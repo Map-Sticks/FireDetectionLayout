@@ -91,3 +91,5 @@ coverage*.info
 *.coverage
 *.coveragexml
 .idea/
+
+.fake
