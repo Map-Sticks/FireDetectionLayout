@@ -55,6 +55,13 @@ namespace FireDetectionLayout.Revit.Placement
                     doc.Regenerate();
                 }
 
+                var existingRefPlanes = new FilteredElementCollector(doc)
+                    .OfClass(typeof(ReferencePlane))
+                    .Cast<ReferencePlane>()
+                    .Where(rp => !string.IsNullOrEmpty(rp.Name))
+                    .GroupBy(rp => rp.Name, StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
                 var refPlanesByZ = new Dictionary<int, ReferencePlane>();
 
                 foreach (var device in toPlace)
@@ -82,14 +89,9 @@ namespace FireDetectionLayout.Revit.Placement
                         if (!refPlanesByZ.TryGetValue(elevKeyMm, out ReferencePlane? refPlane))
                         {
                             double zFt = elevKeyMm * MmToFt;
-                            refPlane = doc.Create.NewReferencePlane(
-                                new XYZ(1, 0, zFt),
-                                new XYZ(0, 0, zFt),
-                                new XYZ(0, 1, 0),
-                                activeView);
-                            refPlane.Name = $"FireLayout_Z_{elevKeyMm}mm";
+                            refPlane = GetOrCreateHorizontalRefPlane(
+                                doc, activeView, existingRefPlanes, elevKeyMm, zFt, plan.RunId);
                             refPlanesByZ[elevKeyMm] = refPlane;
-                            doc.Regenerate();
                         }
 
                         var pt = new XYZ(device.Location.X * MmToFt, device.Location.Y * MmToFt, elevKeyMm * MmToFt);
@@ -123,6 +125,49 @@ namespace FireDetectionLayout.Revit.Placement
             }
 
             return result;
+        }
+
+        private static ReferencePlane GetOrCreateHorizontalRefPlane(
+            Document doc,
+            View activeView,
+            Dictionary<string, ReferencePlane> existingRefPlanes,
+            int elevKeyMm,
+            double zFt,
+            string runId)
+        {
+            string baseName = $"FireLayout_Z_{elevKeyMm}mm";
+            if (existingRefPlanes.TryGetValue(baseName, out ReferencePlane? existing))
+            {
+                try
+                {
+                    Plane plane = existing.GetPlane();
+                    if (Math.Abs(plane.Normal.Z) > 0.99 && Math.Abs(plane.Origin.Z - zFt) <= 0.005)
+                        return existing;
+                }
+                catch
+                {
+                    // Fall through and create a new uniquely named plane.
+                }
+            }
+
+            ReferencePlane created = doc.Create.NewReferencePlane(
+                new XYZ(1, 0, zFt),
+                new XYZ(0, 0, zFt),
+                new XYZ(0, 1, 0),
+                activeView);
+
+            string uniqueName = baseName;
+            int suffix = 1;
+            while (existingRefPlanes.ContainsKey(uniqueName))
+            {
+                uniqueName = suffix == 1 ? $"{baseName}_{runId}" : $"{baseName}_{runId}_{suffix}";
+                suffix++;
+            }
+
+            created.Name = uniqueName;
+            existingRefPlanes[uniqueName] = created;
+            doc.Regenerate();
+            return created;
         }
     }
 }
