@@ -1,27 +1,29 @@
 using System;
 using Autodesk.Revit.Attributes;
+using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
 using JetBrains.Annotations;
-using Nice3point.Revit.Toolkit.External;
 
 namespace FireDetectionLayout.Revit.Commands
 {
     [UsedImplicitly]
     [Transaction(TransactionMode.Manual)]
-    public class OpenFireLayoutCommand : ExternalCommand
+    public class OpenFireLayoutCommand : IExternalCommand
     {
-        public override void Execute()
+        public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
         {
-            if (Application.ActiveUIDocument == null)
+            var uiApp = commandData.Application;
+            if (uiApp.ActiveUIDocument == null)
             {
                 TaskDialog.Show("Fire Detection Layout", "Open a Revit project first.");
-                return;
+                return Result.Cancelled;
             }
 
             if (FireDetectionLayout.Revit.Application.PaneInstance == null)
                 throw new InvalidOperationException("Fire Detection Layout dockable pane was not registered.");
 
-            Application.GetDockablePane(FireDetectionLayout.Revit.Application.PaneId).Show();
+            uiApp.GetDockablePane(FireDetectionLayout.Revit.Application.PaneId).Show();
+            return Result.Succeeded;
         }
     }
 }

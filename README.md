@@ -15,6 +15,7 @@ Built with **Nice3point.Revit.Sdk** for Visual Studio 2022 (`Revit 2023–2027`)
 
 1. Open `FireDetectionLayout.sln` in Visual Studio 2022.
 2. Select the build configuration matching your installed Revit version (for example `Debug.R25` for Revit 2025 or `Debug.R24` for Revit 2024).
+   > `Debug.R27` / `Release.R27` (Revit 2027) target .NET 10, which needs Visual Studio 2026 and the .NET 10 SDK. In Visual Studio 2022, use `R23`–`R26`.
 3. Press **F5** — `Nice3point.Revit.Sdk` automatically builds, deploys the `.addin` manifest and assemblies, and launches Revit with the debugger attached.
 4. In Revit, open the **Fire Layout** ribbon tab → **Fire Detection Layout** to open the dockable review panel.
 
