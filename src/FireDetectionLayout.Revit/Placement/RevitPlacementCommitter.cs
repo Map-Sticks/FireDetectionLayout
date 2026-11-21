@@ -15,9 +15,10 @@ namespace FireDetectionLayout.Revit.Placement
     }
 
     /// <summary>
-    /// Commits approved ProposedDevice items into Revit in a single atomic transaction
-    /// using horizontal reference planes at ceiling underside elevation so linked-ceiling
-    /// hosting works reliably across Revit 2023-2027.
+    /// Commits approved ProposedDevice items into Revit in a single atomic transaction.
+    /// Places devices hosted on the active view's Level with an elevation offset matching
+    /// the solved ceiling/soffit height, falling back to a horizontal reference plane only
+    /// if a family rejects level-plane hosting.
     /// </summary>
     public sealed class RevitPlacementCommitter
     {
@@ -41,9 +42,10 @@ namespace FireDetectionLayout.Revit.Placement
             if (toPlace.Count == 0)
                 return result;
 
-            bool isOneLevelBased = detectorSymbol.Family?.FamilyPlacementType == FamilyPlacementType.OneLevelBased;
             Level? activeLevel = activeView.GenLevel;
             double levelElevMm = activeLevel != null ? activeLevel.Elevation * FtToMm : 0.0;
+            bool isOneLevelBased = detectorSymbol.Family?.FamilyPlacementType == FamilyPlacementType.OneLevelBased;
+            Reference? levelPlaneRef = activeLevel?.GetPlaneReference();
 
             using (var tx = new Transaction(doc, $"Fire Detection Layout ({plan.RunId})"))
             {
@@ -55,21 +57,16 @@ namespace FireDetectionLayout.Revit.Placement
                     doc.Regenerate();
                 }
 
-                var existingRefPlanes = new FilteredElementCollector(doc)
-                    .OfClass(typeof(ReferencePlane))
-                    .Cast<ReferencePlane>()
-                    .Where(rp => !string.IsNullOrEmpty(rp.Name))
-                    .GroupBy(rp => rp.Name, StringComparer.OrdinalIgnoreCase)
-                    .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
-
+                Dictionary<string, ReferencePlane>? existingRefPlanes = null;
                 var refPlanesByZ = new Dictionary<int, ReferencePlane>();
 
                 foreach (var device in toPlace)
                 {
                     int elevKeyMm = (int)Math.Round(device.ElevationMm);
-                    FamilyInstance instance;
+                    double offsetFt = (elevKeyMm - levelElevMm) * MmToFt;
+                    FamilyInstance? instance = null;
 
-                    if (isOneLevelBased && activeLevel != null)
+                    if (activeLevel != null && isOneLevelBased)
                     {
                         var pt = new XYZ(device.Location.X * MmToFt, device.Location.Y * MmToFt, 0.0);
                         instance = doc.Create.NewFamilyInstance(
@@ -78,14 +75,31 @@ namespace FireDetectionLayout.Revit.Placement
                             activeLevel,
                             StructuralType.NonStructural);
 
-                        double offsetFt = (elevKeyMm - levelElevMm) * MmToFt;
-                        Parameter? elevParam = instance.get_Parameter(BuiltInParameter.INSTANCE_ELEVATION_PARAM)
-                            ?? instance.get_Parameter(BuiltInParameter.INSTANCE_FREE_HOST_OFFSET_PARAM);
-                        if (elevParam != null && !elevParam.IsReadOnly)
-                            elevParam.Set(offsetFt);
+                        ApplyLevelElevationOffset(doc, instance, activeLevel.Elevation, offsetFt);
                     }
-                    else
+                    else if (activeLevel != null && levelPlaneRef != null)
                     {
+                        try
+                        {
+                            var pt = new XYZ(device.Location.X * MmToFt, device.Location.Y * MmToFt, activeLevel.Elevation);
+                            instance = doc.Create.NewFamilyInstance(
+                                levelPlaneRef,
+                                pt,
+                                XYZ.BasisX,
+                                detectorSymbol);
+
+                            TryFlipWorkPlane(instance);
+                            ApplyLevelElevationOffset(doc, instance, activeLevel.Elevation, offsetFt);
+                        }
+                        catch
+                        {
+                            instance = null;
+                        }
+                    }
+
+                    if (instance == null)
+                    {
+                        existingRefPlanes ??= CollectExistingRefPlanes(doc);
                         if (!refPlanesByZ.TryGetValue(elevKeyMm, out ReferencePlane? refPlane))
                         {
                             double zFt = elevKeyMm * MmToFt;
@@ -101,15 +115,7 @@ namespace FireDetectionLayout.Revit.Placement
                             XYZ.BasisX,
                             detectorSymbol);
 
-                        try
-                        {
-                            if (instance.CanFlipWorkPlane)
-                                instance.IsWorkPlaneFlipped = true;
-                        }
-                        catch
-                        {
-                            // Non-flippable family; keep default orientation.
-                        }
+                        TryFlipWorkPlane(instance);
                     }
 
                     Parameter? comments = instance.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS);
@@ -125,6 +131,59 @@ namespace FireDetectionLayout.Revit.Placement
             }
 
             return result;
+        }
+
+        private static void TryFlipWorkPlane(FamilyInstance instance)
+        {
+            try
+            {
+                if (instance.CanFlipWorkPlane)
+                    instance.IsWorkPlaneFlipped = true;
+            }
+            catch
+            {
+                // Non-flippable family; keep default orientation.
+            }
+        }
+
+        private static void ApplyLevelElevationOffset(
+            Document doc,
+            FamilyInstance instance,
+            double levelElevationFt,
+            double targetOffsetFt)
+        {
+            Parameter? elevParam = instance.get_Parameter(BuiltInParameter.INSTANCE_ELEVATION_PARAM);
+            if (elevParam != null && !elevParam.IsReadOnly)
+            {
+                elevParam.Set(targetOffsetFt);
+                return;
+            }
+
+            Parameter? hostOffsetParam = instance.get_Parameter(BuiltInParameter.INSTANCE_FREE_HOST_OFFSET_PARAM);
+            if (hostOffsetParam == null || hostOffsetParam.IsReadOnly)
+                return;
+
+            double signedOffset = instance.IsWorkPlaneFlipped ? -targetOffsetFt : targetOffsetFt;
+            hostOffsetParam.Set(signedOffset);
+            doc.Regenerate();
+
+            // Verify actual Z elevation; if flipping inverted the offset direction, correct it.
+            if (instance.Location is LocationPoint lp &&
+                Math.Abs(lp.Point.Z - (levelElevationFt + targetOffsetFt)) > 0.05 &&
+                Math.Abs(lp.Point.Z - (levelElevationFt - targetOffsetFt)) <= 0.05)
+            {
+                hostOffsetParam.Set(-signedOffset);
+            }
+        }
+
+        private static Dictionary<string, ReferencePlane> CollectExistingRefPlanes(Document doc)
+        {
+            return new FilteredElementCollector(doc)
+                .OfClass(typeof(ReferencePlane))
+                .Cast<ReferencePlane>()
+                .Where(rp => !string.IsNullOrEmpty(rp.Name))
+                .GroupBy(rp => rp.Name, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
         }
 
         private static ReferencePlane GetOrCreateHorizontalRefPlane(

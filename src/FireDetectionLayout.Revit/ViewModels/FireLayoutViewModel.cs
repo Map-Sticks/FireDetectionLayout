@@ -59,6 +59,9 @@ namespace FireDetectionLayout.Revit.ViewModels
         private double _maxWallReachMm = 5000.0;
 
         [ObservableProperty]
+        private double _minWallOffsetMm = 500.0;
+
+        [ObservableProperty]
         private bool _canCommit;
 
         [ObservableProperty]
@@ -215,6 +218,9 @@ namespace FireDetectionLayout.Revit.ViewModels
             var profile = RuleProfile.CreateAs1670Default();
             profile.SmokeDetection.MaxDetectorSpacingMm = MaxSpacingMm;
             profile.SmokeDetection.MaxWallDistanceMm = MaxWallReachMm;
+            double clampedWallOffset = Math.Max(0.0, MinWallOffsetMm);
+            profile.SmokeDetection.MinWallClearanceMm = clampedWallOffset;
+            profile.SmokeDetection.HardMinWallClearanceMm = Math.Min(clampedWallOffset, profile.SmokeDetection.HardMinWallClearanceMm);
             var dispatcher = System.Windows.Application.Current?.Dispatcher;
             if (dispatcher == null)
                 throw new InvalidOperationException("The WPF dispatcher is unavailable for solver results.");
@@ -261,7 +267,8 @@ namespace FireDetectionLayout.Revit.ViewModels
 
             var s = _lastPlan.Summary;
             SummaryLine = $"Compartments: {s.TotalCompartments} (Green: {s.GreenCount}, Amber: {s.AmberCount}, Red: {s.RedCount}, Skipped: {s.SkippedCount}) | Detectors: {s.TotalSmokeDetectors} | Open edges: {s.UnresolvedOpenEdgeCount}";
-            StatusMessage = $"Solved level '{snapshot.Metadata.LevelName}' ({snapshot.Walls.Count} wall segments, {snapshot.Ceilings.Count} ceilings, {snapshot.Soffits.Count} soffits).";
+            string warningSuffix = plan.Warnings.Count > 0 ? $", {plan.Warnings.Count} warning(s)" : string.Empty;
+            StatusMessage = $"Solved '{snapshot.Metadata.LevelName}': {snapshot.Rooms.Count} rooms, {snapshot.Spaces.Count} spaces, {snapshot.Ceilings.Count} ceilings, {snapshot.Soffits.Count} soffits{warningSuffix}.";
             UpdateCanCommit();
             SelectedCompartment = Compartments.FirstOrDefault();
         }

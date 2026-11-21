@@ -131,15 +131,58 @@ namespace FireDetectionLayout.Core.Geometry
 
         public static Polygon ToNtsPolygon(Polygon2D poly)
         {
-            var outer = EnsureClosedRing(poly.OuterRing);
-            var shell = Factory.CreateLinearRing(outer);
-            var holes = new List<LinearRing>();
+            var allRings = new List<IReadOnlyList<Point2D>>();
+            if (poly.OuterRing.Count >= 3)
+                allRings.Add(poly.OuterRing);
             foreach (var hole in poly.Holes)
             {
                 if (hole.Count >= 3)
-                    holes.Add(Factory.CreateLinearRing(EnsureClosedRing(hole)));
+                    allRings.Add(hole);
+            }
+
+            if (allRings.Count == 0)
+                return Factory.CreatePolygon();
+
+            // Defensively ensure the largest-area ring is treated as the outer shell so
+            // snapshots with misordered Revit CurveLoops still build valid polygons.
+            int outerIdx = 0;
+            double maxArea = ComputeAbsRingArea(allRings[0]);
+            for (int i = 1; i < allRings.Count; i++)
+            {
+                double area = ComputeAbsRingArea(allRings[i]);
+                if (area > maxArea)
+                {
+                    maxArea = area;
+                    outerIdx = i;
+                }
+            }
+
+            var shell = Factory.CreateLinearRing(EnsureClosedRing(allRings[outerIdx]));
+            var shellPoly = Factory.CreatePolygon(shell);
+            var holes = new List<LinearRing>();
+            for (int i = 0; i < allRings.Count; i++)
+            {
+                if (i == outerIdx)
+                    continue;
+
+                var holeRing = Factory.CreateLinearRing(EnsureClosedRing(allRings[i]));
+                var holePoly = Factory.CreatePolygon(holeRing);
+                if (!shellPoly.IsValid || shellPoly.Covers(holePoly))
+                    holes.Add(holeRing);
             }
             return Factory.CreatePolygon(shell, holes.ToArray());
+        }
+
+        private static double ComputeAbsRingArea(IReadOnlyList<Point2D> ring)
+        {
+            double sum = 0.0;
+            for (int i = 0; i < ring.Count; i++)
+            {
+                var a = ring[i];
+                var b = ring[(i + 1) % ring.Count];
+                sum += a.X * b.Y - b.X * a.Y;
+            }
+            return Math.Abs(sum) * 0.5;
         }
 
         private static Coordinate[] EnsureClosedRing(IReadOnlyList<Point2D> pts)
@@ -154,7 +197,46 @@ namespace FireDetectionLayout.Core.Geometry
             return coords.ToArray();
         }
 
-        private static Polygon2D ToPolygon2D(Polygon poly)
+        public static Polygon? TryToValidNtsPolygon(Polygon2D? poly)
+        {
+            if (poly == null || poly.OuterRing.Count < 3)
+                return null;
+
+            var nts = ToNtsPolygon(poly);
+            if (nts.IsEmpty)
+                return null;
+
+            if (nts.IsValid)
+                return nts;
+
+            try
+            {
+                var repaired = nts.Buffer(0);
+                if (repaired is Polygon validPoly && !validPoly.IsEmpty && validPoly.IsValid)
+                    return validPoly;
+                if (repaired is MultiPolygon mp && mp.NumGeometries > 0)
+                {
+                    Polygon? largest = null;
+                    for (int i = 0; i < mp.NumGeometries; i++)
+                    {
+                        if (mp.GetGeometryN(i) is Polygon p && !p.IsEmpty && p.IsValid &&
+                            (largest == null || p.Area > largest.Area))
+                        {
+                            largest = p;
+                        }
+                    }
+                    return largest;
+                }
+            }
+            catch
+            {
+                // Fall through and return null for irredeemable geometry.
+            }
+
+            return null;
+        }
+
+        public static Polygon2D ToPolygon2D(Polygon poly)
         {
             var result = new Polygon2D();
             var exterior = poly.ExteriorRing.Coordinates;

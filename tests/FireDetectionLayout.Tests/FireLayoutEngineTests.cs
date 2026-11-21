@@ -267,6 +267,279 @@ namespace FireDetectionLayout.Tests
         }
 
         [Fact]
+        public void Solve_LongRoomPlacesDetectorsInSymmetricWellSpacedGrid()
+        {
+            var snapshot = BuildRectangularRoomSnapshot(14000, 6000, "Plasterboard", null);
+            var plan = new FireLayoutEngine().Solve(snapshot);
+
+            var comp = Assert.Single(plan.Compartments);
+            Assert.Equal(CompartmentStatus.Green, comp.Status);
+            Assert.Equal(2, plan.Devices.Count);
+
+            var ordered = plan.Devices.OrderBy(d => d.Location.X).ToList();
+            Assert.Equal(3500.0, ordered[0].Location.X, 1);
+            Assert.Equal(3000.0, ordered[0].Location.Y, 1);
+            Assert.Equal(10500.0, ordered[1].Location.X, 1);
+            Assert.Equal(3000.0, ordered[1].Location.Y, 1);
+
+            double spacing = ordered[0].Location.DistanceTo(ordered[1].Location);
+            Assert.InRange(spacing, 6900.0, 7100.0);
+        }
+
+        [Fact]
+        public void Solve_RotatedRoomFollowsRoomProfileOrientation()
+        {
+            double angleRad = 30.0 * Math.PI / 180.0;
+            double cos = Math.Cos(angleRad);
+            double sin = Math.Sin(angleRad);
+            Point2D Rot(double u, double v) => new Point2D(u * cos - v * sin, u * sin + v * cos);
+
+            var ring = new List<Point2D>
+            {
+                Rot(0, 0),
+                Rot(14000, 0),
+                Rot(14000, 6000),
+                Rot(0, 6000)
+            };
+
+            var snapshot = new SceneSnapshot
+            {
+                Metadata = new SnapshotMetadata
+                {
+                    DocumentTitle = "Rotated.rvt",
+                    LevelName = "Level 1",
+                    LevelElevationMm = 0,
+                    DefaultCeilingHeightMm = 2700
+                }
+            };
+            AddWalls(ring, snapshot.Walls);
+            snapshot.Ceilings.Add(new CeilingSurface
+            {
+                ElementId = "C-ROT",
+                TypeName = "Plasterboard",
+                UndersideElevationMm = 2700,
+                TopElevationMm = 2750,
+                Footprint = new Polygon2D { OuterRing = ring }
+            });
+
+            var plan = new FireLayoutEngine().Solve(snapshot);
+
+            var comp = Assert.Single(plan.Compartments);
+            Assert.Equal(CompartmentStatus.Green, comp.Status);
+            Assert.Equal(2, plan.Devices.Count);
+
+            // Project placed devices back into the rotated room's (u, v) frame.
+            var uv = plan.Devices
+                .Select(d => (
+                    U: d.Location.X * cos + d.Location.Y * sin,
+                    V: -d.Location.X * sin + d.Location.Y * cos))
+                .OrderBy(p => p.U)
+                .ToList();
+
+            Assert.InRange(uv[0].U, 3400.0, 3600.0);
+            Assert.InRange(uv[0].V, 2900.0, 3100.0);
+            Assert.InRange(uv[1].U, 10400.0, 10600.0);
+            Assert.InRange(uv[1].V, 2900.0, 3100.0);
+        }
+
+        [Fact]
+        public void Solve_RespectsConfiguredMinimumWallOffset()
+        {
+            var snapshot = BuildRectangularRoomSnapshot(14000, 5000, "Plasterboard", null);
+            var profile = RuleProfile.CreateAs1670Default();
+            profile.SmokeDetection.MaxWallDistanceMm = 3500.0;
+            profile.SmokeDetection.MaxDetectorSpacingMm = 7000.0;
+            profile.SmokeDetection.MinWallClearanceMm = 2000.0;
+            profile.SmokeDetection.HardMinWallClearanceMm = 300.0;
+
+            var plan = new FireLayoutEngine().Solve(snapshot, profile);
+
+            var comp = Assert.Single(plan.Compartments);
+            Assert.Equal(CompartmentStatus.Green, comp.Status);
+            Assert.True(plan.Devices.Count >= 2);
+            Assert.All(plan.Devices, d =>
+            {
+                Assert.True(d.Location.X >= 1999.0 && d.Location.X <= 12001.0);
+                Assert.True(d.Location.Y >= 1999.0 && d.Location.Y <= 3001.0);
+            });
+        }
+
+        [Fact]
+        public void Solve_ReordersMisorderedCeilingLoopsSoPipeHoleDoesNotInvalidateCorridor()
+        {
+            var corridor = RectanglePolygon(0, 0, 24000, 2400);
+            var snapshot = BuildSnapshot(corridor, "5/8\" GWB on Mtl. Furring");
+            // Simulate Revit returning a 120mm pipe penetration loop before the actual ceiling boundary.
+            snapshot.Ceilings[0].Footprint = new Polygon2D
+            {
+                OuterRing = RectanglePolygon(4000, 1000, 4120, 1120).OuterRing,
+                Holes = new List<List<Point2D>> { corridor.OuterRing }
+            };
+
+            var plan = new FireLayoutEngine().Solve(snapshot);
+
+            var comp = Assert.Single(plan.Compartments);
+            Assert.Equal(CeilingKind.Plasterboard, comp.CeilingKind);
+            Assert.Equal(CompartmentStatus.Green, comp.Status);
+            Assert.True(comp.IsApprovedForPlacement);
+            Assert.Equal(3, plan.Devices.Count);
+        }
+
+        [Fact]
+        public void Solve_SmallRoomWithCornerNotchAndColumnPlacesSingleDetector()
+        {
+            var room = new Polygon2D
+            {
+                OuterRing = new List<Point2D>
+                {
+                    new Point2D(0, 0), new Point2D(4000, 0), new Point2D(4000, 3000),
+                    new Point2D(1000, 3000), new Point2D(1000, 2400), new Point2D(0, 2400)
+                },
+                Holes = new List<List<Point2D>>
+                {
+                    // 400mm x 400mm structural column
+                    RectanglePolygon(1400, 1300, 1800, 1700).OuterRing
+                }
+            };
+            var snapshot = BuildSnapshot(room, "Plasterboard");
+
+            var plan = new FireLayoutEngine().Solve(snapshot);
+
+            var comp = Assert.Single(plan.Compartments);
+            Assert.Equal(CompartmentStatus.Green, comp.Status);
+            Assert.Single(plan.Devices);
+        }
+
+        [Fact]
+        public void Solve_RecoversRoomWhenWallCenterlineLoopIsOpenAndSubtractsEnclosedSubRooms()
+        {
+            // Simulate Office Unit 401: south wall has a 250mm centerline gap so wall-graph fails,
+            // while an interior WC (0..3000 x 7000..10000) DOES close in the wall graph.
+            var snapshot = new SceneSnapshot
+            {
+                Metadata = new SnapshotMetadata { LevelName = "L4", LevelElevationMm = 10000 }
+            };
+
+            // Closed WC sub-room walls
+            AddWall(snapshot, 0, 7000, 3000, 7000, 10000, 13500);
+            AddWall(snapshot, 3000, 7000, 3000, 10000, 10000, 13500);
+            AddWall(snapshot, 3000, 10000, 0, 10000, 10000, 13500);
+            AddWall(snapshot, 0, 10000, 0, 7000, 10000, 13500);
+
+            // Outer office walls with a 250mm gap at the south-east corner
+            AddWall(snapshot, 0, 0, 11750, 0, 10000, 13500);
+            AddWall(snapshot, 12000, 0, 12000, 10000, 10000, 13500);
+            AddWall(snapshot, 12000, 10000, 3000, 10000, 10000, 13500);
+            AddWall(snapshot, 0, 7000, 0, 0, 10000, 13500);
+
+            // Overhead concrete soffit covering the entire floor (no suspended ceiling)
+            snapshot.Soffits.Add(new CeilingSurface
+            {
+                ElementId = "SOF-1",
+                TypeName = "NW Concrete on Metal Deck",
+                UndersideElevationMm = 13500,
+                TopElevationMm = 13700,
+                Footprint = RectanglePolygon(-500, -500, 12500, 10500)
+            });
+
+            // Revit Room boundary for Office Unit 401 (L-shaped around the WC)
+            snapshot.Rooms.Add(new RoomMetadata
+            {
+                ElementId = "RM-401",
+                Number = "401",
+                Name = "Office Unit",
+                AreaSqM = 111.0,
+                UnboundedHeightMm = 3500,
+                LocationPoint = new Point2D(7000, 5000),
+                Footprint = new Polygon2D
+                {
+                    OuterRing = new List<Point2D>
+                    {
+                        new Point2D(0, 0), new Point2D(12000, 0), new Point2D(12000, 10000),
+                        new Point2D(3000, 10000), new Point2D(3000, 7000), new Point2D(0, 7000)
+                    }
+                }
+            });
+
+            var plan = new FireLayoutEngine().Solve(snapshot);
+
+            Assert.Equal(2, plan.Compartments.Count);
+            var office = Assert.Single(plan.Compartments, c => c.DisplayName == "401 Office Unit");
+            Assert.Equal("Room", office.SourceKind);
+            Assert.Equal(CeilingKind.ExposedOrNone, office.CeilingKind);
+            Assert.True(office.IsApprovedForPlacement);
+            Assert.True(office.ProposedDetectorCount >= 2);
+            Assert.Equal(13500, office.CeilingElevationMm);
+        }
+
+        [Fact]
+        public void Solve_RecoversMepSpaceAndOrphanCeilingWhenNoWallsClose()
+        {
+            var snapshot = new SceneSnapshot
+            {
+                Metadata = new SnapshotMetadata { LevelName = "L4", LevelElevationMm = 0 }
+            };
+
+            // MEP Space with no walls and no ceiling/soffit -> uses UnboundedHeightMm fallback
+            snapshot.Spaces.Add(new RoomMetadata
+            {
+                ElementId = "SP-101",
+                Number = "101",
+                Name = "Open Shell",
+                IsSpace = true,
+                AreaSqM = 36.0,
+                UnboundedHeightMm = 3200,
+                LocationPoint = new Point2D(3000, 3000),
+                Footprint = RectanglePolygon(0, 0, 6000, 6000)
+            });
+
+            // Separate orphan ceiling with no walls and no room/space
+            snapshot.Ceilings.Add(new CeilingSurface
+            {
+                ElementId = "CLG-202",
+                TypeName = "Plasterboard",
+                MaterialName = "Gypsum",
+                UndersideElevationMm = 2800,
+                TopElevationMm = 2820,
+                Footprint = RectanglePolygon(10000, 0, 15000, 5000)
+            });
+
+            var plan = new FireLayoutEngine().Solve(snapshot);
+
+            Assert.Equal(2, plan.Compartments.Count);
+            var spaceComp = Assert.Single(plan.Compartments, c => c.SourceKind == "Space");
+            Assert.Equal("101 Open Shell", spaceComp.DisplayName);
+            Assert.Equal(3200, spaceComp.CeilingElevationMm);
+            Assert.Equal(1, spaceComp.ProposedDetectorCount);
+
+            var ceilComp = Assert.Single(plan.Compartments, c => c.SourceKind == "Ceiling");
+            Assert.Equal(CeilingKind.Plasterboard, ceilComp.CeilingKind);
+            Assert.Equal(1, ceilComp.ProposedDetectorCount);
+        }
+
+        [Fact]
+        public void Solve_EmitsWarningWhenRoomHasNoFootprintAndIsMissedByWalls()
+        {
+            var snapshot = new SceneSnapshot
+            {
+                Metadata = new SnapshotMetadata { LevelName = "L4", LevelElevationMm = 0 }
+            };
+            snapshot.Rooms.Add(new RoomMetadata
+            {
+                ElementId = "RM-999",
+                Number = "401",
+                Name = "Office Unit",
+                AreaSqM = 216.0,
+                LocationPoint = new Point2D(5000, 5000),
+                Footprint = null
+            });
+
+            var plan = new FireLayoutEngine().Solve(snapshot);
+
+            Assert.Contains(plan.Warnings, w => w.Contains("401 Office Unit"));
+        }
+
+        [Fact]
         public void SnapshotSerializer_RoundTripsSnapshotAndPlan()
         {
             var snapshot = BuildRectangularRoomSnapshot(6000, 4000, "Plasterboard", null);
@@ -331,6 +604,18 @@ namespace FireDetectionLayout.Tests
                     }
                 }
             };
+        }
+
+        private static void AddWall(SceneSnapshot snapshot, double x0, double y0, double x1, double y1, double baseZ, double topZ)
+        {
+            snapshot.Walls.Add(new WallBarrier
+            {
+                ElementId = $"W-{snapshot.Walls.Count + 1}",
+                Centerline = new Segment2D(new Point2D(x0, y0), new Point2D(x1, y1)),
+                ThicknessMm = 150,
+                BaseElevationMm = baseZ,
+                TopElevationMm = topZ
+            });
         }
 
         private static SceneSnapshot BuildSnapshot(Polygon2D area, string ceilingType)

@@ -15,9 +15,11 @@ namespace FireDetectionLayout.Core.Models
         public List<CeilingSurface> Ceilings { get; set; } = new List<CeilingSurface>();
         public List<CeilingSurface> Soffits { get; set; } = new List<CeilingSurface>();
         public List<RoomMetadata> Rooms { get; set; } = new List<RoomMetadata>();
+        public List<RoomMetadata> Spaces { get; set; } = new List<RoomMetadata>();
         public List<MepObstacle> Obstacles { get; set; } = new List<MepObstacle>();
         public List<DoorFeature> Doors { get; set; } = new List<DoorFeature>();
         public List<ExistingFireDevice> ExistingDevices { get; set; } = new List<ExistingFireDevice>();
+        public List<string> Diagnostics { get; set; } = new List<string>();
     }
 
     public sealed class SnapshotMetadata
@@ -44,6 +46,7 @@ namespace FireDetectionLayout.Core.Models
         public double TopElevationMm { get; set; }
         public bool IsStructuralBeamOrBulkhead { get; set; }
         public bool IsCurtainWall { get; set; }
+        public bool IsRoomBounding { get; set; } = true;
     }
 
     public sealed class CeilingSurface
@@ -65,7 +68,10 @@ namespace FireDetectionLayout.Core.Models
         public string SourceModel { get; set; } = "Host";
         public string Number { get; set; } = string.Empty;
         public string Name { get; set; } = string.Empty;
+        public bool IsSpace { get; set; }
+        public bool IsEnclosed { get; set; } = true;
         public double AreaSqM { get; set; }
+        public double UnboundedHeightMm { get; set; }
         public Point2D LocationPoint { get; set; } = new Point2D();
         public Polygon2D? Footprint { get; set; }
     }

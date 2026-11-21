@@ -30,6 +30,11 @@
                 <TextBlock Text="Max Wall Reach (mm):" VerticalAlignment="Center" Margin="0,0,6,0"/>
                 <TextBox Width="68" Text="{Binding MaxWallReachMm, UpdateSourceTrigger=PropertyChanged}"/>
             </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,12,4">
+                <TextBlock Text="Min Wall Offset (mm):" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <TextBox Width="60" Text="{Binding MinWallOffsetMm, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="Minimum clearance from walls and bulkheads (mm)."/>
+            </StackPanel>
         </WrapPanel>
 
         <Grid Grid.Row="2" Margin="0,0,0,8">

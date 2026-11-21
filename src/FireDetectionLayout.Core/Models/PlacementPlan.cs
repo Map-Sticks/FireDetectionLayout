@@ -35,6 +35,7 @@ namespace FireDetectionLayout.Core.Models
         public List<SmokeCompartment> Compartments { get; set; } = new List<SmokeCompartment>();
         public List<ProposedDevice> Devices { get; set; } = new List<ProposedDevice>();
         public List<Segment2D> UnresolvedOpenEdges { get; set; } = new List<Segment2D>();
+        public List<string> Warnings { get; set; } = new List<string>();
         public PlacementSummary Summary { get; set; } = new PlacementSummary();
     }
 
@@ -42,6 +43,7 @@ namespace FireDetectionLayout.Core.Models
     {
         public string CompartmentId { get; set; } = string.Empty;
         public string DisplayName { get; set; } = string.Empty;
+        public string SourceKind { get; set; } = "Walls";
         public List<string> RoomNames { get; set; } = new List<string>();
         public Polygon2D Boundary { get; set; } = new Polygon2D();
         public double AreaSqM { get; set; }
