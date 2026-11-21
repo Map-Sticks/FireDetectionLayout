@@ -13,6 +13,7 @@ namespace FireDetectionLayout.Core.Models
         public SnapshotMetadata Metadata { get; set; } = new SnapshotMetadata();
         public List<WallBarrier> Walls { get; set; } = new List<WallBarrier>();
         public List<CeilingSurface> Ceilings { get; set; } = new List<CeilingSurface>();
+        public List<CeilingSurface> Soffits { get; set; } = new List<CeilingSurface>();
         public List<RoomMetadata> Rooms { get; set; } = new List<RoomMetadata>();
         public List<MepObstacle> Obstacles { get; set; } = new List<MepObstacle>();
         public List<DoorFeature> Doors { get; set; } = new List<DoorFeature>();

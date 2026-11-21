@@ -15,6 +15,7 @@ namespace FireDetectionLayout.Core.Geometry
         public double DominantElevationMm { get; set; }
         public CeilingSurface? PrimaryTileCeiling { get; set; }
         public CeilingSurface? PrimaryCeiling { get; set; }
+        public CeilingSurface? PrimarySoffit { get; set; }
         public double CoverageRatio { get; set; }
         public double TileShareRatio { get; set; }
         public double PlasterboardShareRatio { get; set; }
@@ -50,19 +51,13 @@ namespace FireDetectionLayout.Core.Geometry
             Polygon2D compartmentPolygon,
             IReadOnlyList<CeilingSurface> ceilings,
             double fallbackElevationMm,
-            CeilingClassificationRules rules)
+            CeilingClassificationRules rules,
+            IReadOnlyList<CeilingSurface>? soffits = null)
         {
             var analysis = new CompartmentCeilingAnalysis
             {
                 DominantElevationMm = fallbackElevationMm
             };
-
-            if (ceilings.Count == 0)
-            {
-                analysis.Kind = CeilingKind.ExposedOrNone;
-                analysis.Notes.Add("No ceiling detected in compartment.");
-                return analysis;
-            }
 
             var compNts = CreateValidatedPolygon(compartmentPolygon, "compartment boundary", analysis);
             if (compNts == null)
@@ -73,6 +68,13 @@ namespace FireDetectionLayout.Core.Geometry
                 return analysis;
 
             var compBounds = compartmentPolygon.GetBounds();
+            if (ceilings.Count == 0)
+            {
+                analysis.Kind = CeilingKind.ExposedOrNone;
+                ResolveExposedSoffit(compNts, compBounds, soffits, fallbackElevationMm, analysis);
+                return analysis;
+            }
+
             double tileArea = 0, plasterArea = 0, slopedArea = 0, unknownArea = 0;
             double bestTileArea = 0, bestAnyArea = 0;
 
@@ -141,7 +143,9 @@ namespace FireDetectionLayout.Core.Geometry
             if (analysis.CoverageRatio < 0.25)
             {
                 analysis.Kind = CeilingKind.ExposedOrNone;
-                analysis.Notes.Add("Ceiling covers less than 25% of compartment; treat as exposed soffit / review.");
+                analysis.PrimaryCeiling = null;
+                analysis.PrimaryTileCeiling = null;
+                ResolveExposedSoffit(compNts, compBounds, soffits, fallbackElevationMm, analysis);
             }
             else if (slopedArea > totalCovered * 0.25)
             {
@@ -169,6 +173,80 @@ namespace FireDetectionLayout.Core.Geometry
             }
 
             return analysis;
+        }
+
+        private static void ResolveExposedSoffit(
+            Polygon compNts,
+            BoundingBox2D compBounds,
+            IReadOnlyList<CeilingSurface>? soffits,
+            double fallbackElevationMm,
+            CompartmentCeilingAnalysis analysis)
+        {
+            CeilingSurface? bestSoffit = null;
+            double bestOverlap = 0.0;
+            double lowestElevMm = double.PositiveInfinity;
+
+            if (soffits != null)
+            {
+                foreach (var soffit in soffits)
+                {
+                    if (soffit.Footprint.OuterRing.Count < 3 ||
+                        !compBounds.Intersects(soffit.Footprint.GetBounds(), 10.0))
+                        continue;
+
+                    Polygon soffitNts;
+                    try
+                    {
+                        soffitNts = WallGraphPolygonizer.ToNtsPolygon(soffit.Footprint);
+                        if (new IsValidOp(soffitNts).ValidationError != null)
+                            continue;
+                    }
+                    catch (ArgumentException)
+                    {
+                        continue;
+                    }
+
+                    double overlap;
+                    try
+                    {
+                        overlap = OverlayNGRobust.Overlay(compNts, soffitNts, SpatialFunction.Intersection).Area;
+                    }
+                    catch (TopologyException)
+                    {
+                        continue;
+                    }
+
+                    if (overlap < 10_000.0)
+                        continue;
+
+                    // Prefer the lowest overhead soffit (e.g. floor slab directly above); break ties by overlap area.
+                    const double elevTieToleranceMm = 50.0;
+                    if (soffit.UndersideElevationMm < lowestElevMm - elevTieToleranceMm ||
+                        (Math.Abs(soffit.UndersideElevationMm - lowestElevMm) <= elevTieToleranceMm && overlap > bestOverlap))
+                    {
+                        lowestElevMm = soffit.UndersideElevationMm;
+                        bestOverlap = overlap;
+                        bestSoffit = soffit;
+                    }
+                }
+            }
+
+            if (bestSoffit != null)
+            {
+                analysis.PrimarySoffit = bestSoffit;
+                analysis.DominantElevationMm = bestSoffit.UndersideElevationMm;
+                string soffitLabel = string.IsNullOrWhiteSpace(bestSoffit.TypeName)
+                    ? "overhead soffit"
+                    : $"overhead soffit '{bestSoffit.TypeName}'";
+                analysis.Notes.Add(
+                    $"No ceiling detected; using {soffitLabel} at {bestSoffit.UndersideElevationMm:F0} mm. Confirm exposed soffit mounting.");
+            }
+            else
+            {
+                analysis.DominantElevationMm = fallbackElevationMm;
+                analysis.Notes.Add(
+                    $"No ceiling or overhead soffit detected; using fallback elevation ({fallbackElevationMm:F0} mm). Confirm soffit height and mounting.");
+            }
         }
 
         private static Polygon? CreateValidatedPolygon(

@@ -22,6 +22,7 @@ namespace FireDetectionLayout.Revit.Commands
             if (FireDetectionLayout.Revit.Application.PaneInstance == null)
                 throw new InvalidOperationException("Fire Detection Layout dockable pane was not registered.");
 
+            FireDetectionLayout.Revit.Application.PaneInstance.ViewModel.LoadFamiliesFromDocument(uiApp.ActiveUIDocument.Document);
             uiApp.GetDockablePane(FireDetectionLayout.Revit.Application.PaneId).Show();
             return Result.Succeeded;
         }

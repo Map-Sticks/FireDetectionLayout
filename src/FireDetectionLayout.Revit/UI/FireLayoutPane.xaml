@@ -8,6 +8,7 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
@@ -20,7 +21,7 @@
                        FontSize="11" Foreground="#4B5563" TextWrapping="Wrap" Margin="0,2,0,0"/>
         </StackPanel>
 
-        <WrapPanel Grid.Row="1" Margin="0,0,0,8">
+        <WrapPanel Grid.Row="1" Margin="0,0,0,6">
             <StackPanel Orientation="Horizontal" Margin="0,0,12,4">
                 <TextBlock Text="Max Spacing (mm):" VerticalAlignment="Center" Margin="0,0,6,0"/>
                 <TextBox Width="68" Text="{Binding MaxSpacingMm, UpdateSourceTrigger=PropertyChanged}"/>
@@ -31,7 +32,24 @@
             </StackPanel>
         </WrapPanel>
 
-        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,8">
+        <Grid Grid.Row="2" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0" Text="Detector Family:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+            <ComboBox Grid.Column="1"
+                      ItemsSource="{Binding AvailableDetectorFamilies}"
+                      SelectedItem="{Binding SelectedDetectorFamily, Mode=TwoWay}"
+                      DisplayMemberPath="DisplayName"
+                      ToolTip="Select the approved Fire Alarm Device family and type to place."/>
+            <Button Grid.Column="2" Content="Refresh" Command="{Binding RefreshFamiliesCommand}"
+                    Padding="8,3" Margin="6,0,0,0"
+                    ToolTip="Reload loaded Fire Alarm Device families from the active Revit project."/>
+        </Grid>
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,0,0,8">
             <Button Content="Analyze Active Level" Command="{Binding AnalyzeActiveLevelCommand}"
                     Padding="10,5" Margin="0,0,6,0" FontWeight="SemiBold"/>
             <Button Content="Re-Solve" Command="{Binding ReSolveCommand}"
@@ -42,7 +60,7 @@
                       VerticalAlignment="Center" Margin="10,0,0,0"/>
         </StackPanel>
 
-        <DataGrid Grid.Row="3"
+        <DataGrid Grid.Row="4"
                   ItemsSource="{Binding Compartments}"
                   SelectedItem="{Binding SelectedCompartment, Mode=TwoWay}"
                   CellEditEnding="CompartmentGrid_CellEditEnding"
@@ -56,16 +74,17 @@
                 <DataGridTextColumn Header="Status" Binding="{Binding Status}" IsReadOnly="True" Width="62"/>
                 <DataGridTextColumn Header="Compartment / Room" Binding="{Binding DisplayName}" IsReadOnly="True" Width="*"/>
                 <DataGridTextColumn Header="Ceiling" Binding="{Binding CeilingKind}" IsReadOnly="True" Width="95"/>
+                <DataGridTextColumn Header="Elev (mm)" Binding="{Binding CeilingElevationMm}" IsReadOnly="True" Width="70"/>
                 <DataGridTextColumn Header="Detectors" Binding="{Binding ProposedDetectorCount}" IsReadOnly="True" Width="68"/>
                 <DataGridTextColumn Header="Wall Max (mm)" Binding="{Binding WorstCaseWallDistanceMm}" IsReadOnly="True" Width="92"/>
             </DataGrid.Columns>
         </DataGrid>
 
-        <TextBox Grid.Row="4" Text="{Binding SelectedCompartmentDetails}" IsReadOnly="True"
+        <TextBox Grid.Row="5" Text="{Binding SelectedCompartmentDetails}" IsReadOnly="True"
                  TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" MaxHeight="70"
                  Margin="0,6,0,0" Padding="4"/>
 
-        <Grid Grid.Row="5" Margin="0,8,0,0">
+        <Grid Grid.Row="6" Margin="0,8,0,0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>

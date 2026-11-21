@@ -51,6 +51,39 @@ namespace FireDetectionLayout.Tests
         }
 
         [Fact]
+        public void AnalyzeCompartment_ExposedSpaceUsesLowestOverlappingSoffitElevation()
+        {
+            var rules = RuleProfile.CreateAs1670Default().Ceilings;
+            var compartment = RectPoly(0, 0, 8000, 6000);
+            var soffits = new List<CeilingSurface>
+            {
+                new CeilingSurface
+                {
+                    ElementId = "Roof-Upper",
+                    TypeName = "250mm Concrete Roof Slab",
+                    UndersideElevationMm = 7400,
+                    Footprint = RectPoly(0, 0, 8000, 6000)
+                },
+                new CeilingSurface
+                {
+                    ElementId = "Slab-L2",
+                    TypeName = "200mm Concrete Slab",
+                    UndersideElevationMm = 3800,
+                    Footprint = RectPoly(0, 0, 8000, 6000)
+                }
+            };
+
+            var analysis = new CeilingClassifier().AnalyzeCompartment(
+                compartment, new List<CeilingSurface>(), 2700, rules, soffits);
+
+            Assert.Equal(CeilingKind.ExposedOrNone, analysis.Kind);
+            Assert.NotNull(analysis.PrimarySoffit);
+            Assert.Equal("Slab-L2", analysis.PrimarySoffit!.ElementId);
+            Assert.Equal(3800, analysis.DominantElevationMm);
+            Assert.Contains(analysis.Notes, note => note.Contains("200mm Concrete Slab") && note.Contains("3800"));
+        }
+
+        [Fact]
         public void AnalyzeCompartment_NearlyCoincidentEdgesPreserveCeilingHoleArea()
         {
             double x = -1520.8249999998925;

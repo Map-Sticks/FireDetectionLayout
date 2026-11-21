@@ -22,6 +22,7 @@ namespace FireDetectionLayout.Revit.Placement
     public sealed class RevitPlacementCommitter
     {
         private const double MmToFt = 1.0 / 304.8;
+        private const double FtToMm = 304.8;
 
         public CommitResult CommitPlan(
             Document doc,
@@ -40,6 +41,10 @@ namespace FireDetectionLayout.Revit.Placement
             if (toPlace.Count == 0)
                 return result;
 
+            bool isOneLevelBased = detectorSymbol.Family?.FamilyPlacementType == FamilyPlacementType.OneLevelBased;
+            Level? activeLevel = activeView.GenLevel;
+            double levelElevMm = activeLevel != null ? activeLevel.Elevation * FtToMm : 0.0;
+
             using (var tx = new Transaction(doc, $"Fire Detection Layout ({plan.RunId})"))
             {
                 tx.Start();
@@ -55,34 +60,54 @@ namespace FireDetectionLayout.Revit.Placement
                 foreach (var device in toPlace)
                 {
                     int elevKeyMm = (int)Math.Round(device.ElevationMm);
-                    if (!refPlanesByZ.TryGetValue(elevKeyMm, out ReferencePlane? refPlane))
-                    {
-                        double zFt = elevKeyMm * MmToFt;
-                        refPlane = doc.Create.NewReferencePlane(
-                            new XYZ(1, 0, zFt),
-                            new XYZ(0, 0, zFt),
-                            new XYZ(0, 1, 0),
-                            activeView);
-                        refPlane.Name = $"FireLayout_Z_{elevKeyMm}mm";
-                        refPlanesByZ[elevKeyMm] = refPlane;
-                        doc.Regenerate();
-                    }
+                    FamilyInstance instance;
 
-                    var pt = new XYZ(device.Location.X * MmToFt, device.Location.Y * MmToFt, elevKeyMm * MmToFt);
-                    FamilyInstance instance = doc.Create.NewFamilyInstance(
-                        refPlane.GetReference(),
-                        pt,
-                        XYZ.BasisX,
-                        detectorSymbol);
+                    if (isOneLevelBased && activeLevel != null)
+                    {
+                        var pt = new XYZ(device.Location.X * MmToFt, device.Location.Y * MmToFt, 0.0);
+                        instance = doc.Create.NewFamilyInstance(
+                            pt,
+                            detectorSymbol,
+                            activeLevel,
+                            StructuralType.NonStructural);
 
-                    try
-                    {
-                        if (instance.CanFlipWorkPlane)
-                            instance.IsWorkPlaneFlipped = true;
+                        double offsetFt = (elevKeyMm - levelElevMm) * MmToFt;
+                        Parameter? elevParam = instance.get_Parameter(BuiltInParameter.INSTANCE_ELEVATION_PARAM)
+                            ?? instance.get_Parameter(BuiltInParameter.INSTANCE_FREE_HOST_OFFSET_PARAM);
+                        if (elevParam != null && !elevParam.IsReadOnly)
+                            elevParam.Set(offsetFt);
                     }
-                    catch
+                    else
                     {
-                        // Non-flippable family; keep default orientation.
+                        if (!refPlanesByZ.TryGetValue(elevKeyMm, out ReferencePlane? refPlane))
+                        {
+                            double zFt = elevKeyMm * MmToFt;
+                            refPlane = doc.Create.NewReferencePlane(
+                                new XYZ(1, 0, zFt),
+                                new XYZ(0, 0, zFt),
+                                new XYZ(0, 1, 0),
+                                activeView);
+                            refPlane.Name = $"FireLayout_Z_{elevKeyMm}mm";
+                            refPlanesByZ[elevKeyMm] = refPlane;
+                            doc.Regenerate();
+                        }
+
+                        var pt = new XYZ(device.Location.X * MmToFt, device.Location.Y * MmToFt, elevKeyMm * MmToFt);
+                        instance = doc.Create.NewFamilyInstance(
+                            refPlane.GetReference(),
+                            pt,
+                            XYZ.BasisX,
+                            detectorSymbol);
+
+                        try
+                        {
+                            if (instance.CanFlipWorkPlane)
+                                instance.IsWorkPlaneFlipped = true;
+                        }
+                        catch
+                        {
+                            // Non-flippable family; keep default orientation.
+                        }
                     }
 
                     Parameter? comments = instance.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS);

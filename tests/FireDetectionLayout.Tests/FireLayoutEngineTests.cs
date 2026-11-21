@@ -186,6 +186,87 @@ namespace FireDetectionLayout.Tests
         }
 
         [Fact]
+        public void Solve_ShellSpaceWithConcreteSoffitOnlyPlacesDetectorsAndFlagsAmber()
+        {
+            var area = RectanglePolygon(0, 0, 8000, 6000);
+            var snapshot = new SceneSnapshot
+            {
+                Metadata = new SnapshotMetadata
+                {
+                    DocumentTitle = "ShellModel.rvt",
+                    LevelName = "Level 1",
+                    LevelElevationMm = 0,
+                    DefaultCeilingHeightMm = 2700
+                },
+                Soffits = new List<CeilingSurface>
+                {
+                    new CeilingSurface
+                    {
+                        ElementId = "S-200",
+                        TypeName = "200mm Concrete Slab",
+                        UndersideElevationMm = 3800,
+                        TopElevationMm = 4000,
+                        Footprint = area
+                    }
+                },
+                Rooms = new List<RoomMetadata>
+                {
+                    new RoomMetadata
+                    {
+                        ElementId = "R-Shell",
+                        Number = "102",
+                        Name = "Shell Tenancy",
+                        LocationPoint = new Point2D(4000, 3000)
+                    }
+                }
+            };
+            AddWalls(area.OuterRing, snapshot.Walls, topElevationMm: 3800);
+
+            var plan = new FireLayoutEngine().Solve(snapshot);
+
+            var comp = Assert.Single(plan.Compartments);
+            Assert.Equal(CeilingKind.ExposedOrNone, comp.CeilingKind);
+            Assert.Equal(CompartmentStatus.Amber, comp.Status);
+            Assert.True(comp.IsApprovedForPlacement);
+            Assert.Equal(3800.0, comp.CeilingElevationMm, 1);
+            Assert.True(comp.ProposedDetectorCount >= 1);
+            Assert.Contains(comp.Notes, note => note.Contains("200mm Concrete Slab"));
+            Assert.All(plan.Devices, d =>
+            {
+                Assert.Equal(3800.0, d.ElevationMm, 1);
+                Assert.Equal(CeilingKind.ExposedOrNone, d.HostCeilingKind);
+                Assert.Equal("S-200", d.HostCeilingElementId);
+            });
+        }
+
+        [Fact]
+        public void Solve_SpaceWithNoCeilingAndNoSoffitStillSolvesAndFlagsAmber()
+        {
+            var area = RectanglePolygon(0, 0, 6000, 4000);
+            var snapshot = new SceneSnapshot
+            {
+                Metadata = new SnapshotMetadata
+                {
+                    DocumentTitle = "NoCeiling.rvt",
+                    LevelName = "Level 1",
+                    LevelElevationMm = 0,
+                    DefaultCeilingHeightMm = 3600
+                }
+            };
+            AddWalls(area.OuterRing, snapshot.Walls, topElevationMm: 3600);
+
+            var plan = new FireLayoutEngine().Solve(snapshot);
+
+            var comp = Assert.Single(plan.Compartments);
+            Assert.Equal(CeilingKind.ExposedOrNone, comp.CeilingKind);
+            Assert.Equal(CompartmentStatus.Amber, comp.Status);
+            Assert.True(comp.IsApprovedForPlacement);
+            Assert.Equal(3600.0, comp.CeilingElevationMm, 1);
+            Assert.Single(plan.Devices);
+            Assert.Equal(3600.0, plan.Devices[0].ElevationMm, 1);
+        }
+
+        [Fact]
         public void SnapshotSerializer_RoundTripsSnapshotAndPlan()
         {
             var snapshot = BuildRectangularRoomSnapshot(6000, 4000, "Plasterboard", null);
@@ -282,7 +363,7 @@ namespace FireDetectionLayout.Tests
             return snapshot;
         }
 
-        private static void AddWalls(IReadOnlyList<Point2D> ring, List<WallBarrier> walls)
+        private static void AddWalls(IReadOnlyList<Point2D> ring, List<WallBarrier> walls, double topElevationMm = 3000)
         {
             for (int i = 0; i < ring.Count; i++)
             {
@@ -290,7 +371,7 @@ namespace FireDetectionLayout.Tests
                 {
                     Centerline = new Segment2D(ring[i], ring[(i + 1) % ring.Count]),
                     BaseElevationMm = 0,
-                    TopElevationMm = 3000
+                    TopElevationMm = topElevationMm
                 });
             }
         }

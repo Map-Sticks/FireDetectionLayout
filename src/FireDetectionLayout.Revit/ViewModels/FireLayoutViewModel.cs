@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
@@ -15,6 +16,25 @@ using FireDetectionLayout.Revit.Placement;
 
 namespace FireDetectionLayout.Revit.ViewModels
 {
+    public sealed class FamilySymbolOption
+    {
+        public FamilySymbolOption(ElementId symbolId, string familyName, string typeName)
+        {
+            SymbolId = symbolId;
+            FamilyName = familyName;
+            TypeName = typeName;
+        }
+
+        public ElementId SymbolId { get; }
+        public string FamilyName { get; }
+        public string TypeName { get; }
+        public string DisplayName => string.IsNullOrWhiteSpace(TypeName)
+            ? FamilyName
+            : $"{FamilyName} : {TypeName}";
+
+        public override string ToString() => DisplayName;
+    }
+
     public sealed partial class FireLayoutViewModel : ObservableObject
     {
         private readonly RevitSceneExtractor _extractor = new RevitSceneExtractor();
@@ -53,12 +73,16 @@ namespace FireDetectionLayout.Revit.ViewModels
         [ObservableProperty]
         private string _selectedCompartmentDetails = "Select a compartment to review its analysis notes.";
 
+        [ObservableProperty]
+        private FamilySymbolOption? _selectedDetectorFamily;
+
+        public ObservableCollection<FamilySymbolOption> AvailableDetectorFamilies { get; } = new ObservableCollection<FamilySymbolOption>();
+
         public ObservableCollection<SmokeCompartment> Compartments { get; } = new ObservableCollection<SmokeCompartment>();
 
         [RelayCommand]
-        private void AnalyzeActiveLevel()
+        private void RefreshFamilies()
         {
-            StatusMessage = "Extracting walls, ceilings, rooms, and MEP obstacles...";
             Application.EventHandler.Raise(uiApp =>
             {
                 UIDocument? uidoc = uiApp.ActiveUIDocument;
@@ -68,6 +92,28 @@ namespace FireDetectionLayout.Revit.ViewModels
                     return;
                 }
 
+                var families = CollectDetectorFamilies(uidoc.Document);
+                ApplyDetectorFamilies(families);
+                StatusMessage = families.Count > 0
+                    ? $"Loaded {families.Count} Fire Alarm Device type(s) from '{uidoc.Document.Title}'."
+                    : "No Fire Alarm Device families loaded in the active project.";
+            });
+        }
+
+        [RelayCommand]
+        private void AnalyzeActiveLevel()
+        {
+            StatusMessage = "Extracting walls, ceilings, soffits, rooms, and MEP obstacles...";
+            Application.EventHandler.Raise(uiApp =>
+            {
+                UIDocument? uidoc = uiApp.ActiveUIDocument;
+                if (uidoc == null)
+                {
+                    StatusMessage = "No active Revit document.";
+                    return;
+                }
+
+                ApplyDetectorFamilies(CollectDetectorFamilies(uidoc.Document));
                 _analysisViewId = uidoc.ActiveView.Id;
                 _lastSnapshot = _extractor.ExtractActiveLevel(uidoc.Document, uidoc.ActiveView);
                 StartSolver(_lastSnapshot);
@@ -108,6 +154,15 @@ namespace FireDetectionLayout.Revit.ViewModels
             if (_lastPlan == null)
                 return;
 
+            FamilySymbolOption? chosenFamily = SelectedDetectorFamily;
+            if (chosenFamily == null)
+            {
+                TaskDialog.Show(
+                    "Fire Detection Layout",
+                    "Select an approved Smoke Detector family first (or load a Fire Alarm Device family into the project and click Refresh).");
+                return;
+            }
+
             int approvedCompartments = Compartments.Count(c => c.IsApprovedForPlacement);
             int approvedDetectors = Compartments.Where(c => c.IsApprovedForPlacement).Sum(c => c.ProposedDetectorCount);
 
@@ -119,7 +174,7 @@ namespace FireDetectionLayout.Revit.ViewModels
 
             TaskDialogResult confirm = TaskDialog.Show(
                 "Confirm Fire Detector Placement",
-                $"Place {approvedDetectors} smoke detector(s) across {approvedCompartments} approved compartment(s) in a single Revit transaction?",
+                $"Place {approvedDetectors} smoke detector(s) across {approvedCompartments} approved compartment(s) using:\n{chosenFamily.DisplayName}\n\nin a single Revit transaction?",
                 TaskDialogCommonButtons.Yes | TaskDialogCommonButtons.No);
 
             if (confirm != TaskDialogResult.Yes)
@@ -131,20 +186,26 @@ namespace FireDetectionLayout.Revit.ViewModels
                 if (uidoc == null || _lastPlan == null)
                     return;
 
-                FamilySymbol? symbol = new FilteredElementCollector(uidoc.Document)
-                    .OfCategory(BuiltInCategory.OST_FireAlarmDevices)
-                    .OfClass(typeof(FamilySymbol))
-                    .Cast<FamilySymbol>()
-                    .FirstOrDefault();
+                FamilySymbol? symbol = uidoc.Document.GetElement(chosenFamily.SymbolId) as FamilySymbol
+                    ?? new FilteredElementCollector(uidoc.Document)
+                        .OfCategory(BuiltInCategory.OST_FireAlarmDevices)
+                        .OfClass(typeof(FamilySymbol))
+                        .Cast<FamilySymbol>()
+                        .FirstOrDefault(s =>
+                            string.Equals(s.FamilyName, chosenFamily.FamilyName, StringComparison.OrdinalIgnoreCase) &&
+                            string.Equals(s.Name, chosenFamily.TypeName, StringComparison.OrdinalIgnoreCase));
 
                 if (symbol == null)
                 {
-                    TaskDialog.Show("Fire Detection Layout", "Load at least one Fire Alarm Device family into the project first.");
+                    ApplyDetectorFamilies(CollectDetectorFamilies(uidoc.Document));
+                    TaskDialog.Show(
+                        "Fire Detection Layout",
+                        $"The selected family '{chosenFamily.DisplayName}' is not available in the active document. Please choose a loaded Fire Alarm Device family.");
                     return;
                 }
 
                 CommitResult res = _committer.CommitPlan(uidoc.Document, uidoc.ActiveView, _lastPlan, symbol);
-                StatusMessage = $"Placed {res.PlacedCount} smoke detector(s) in 1 transaction (Ctrl+Z to undo).";
+                StatusMessage = $"Placed {res.PlacedCount} smoke detector(s) using '{chosenFamily.DisplayName}' in 1 transaction (Ctrl+Z to undo).";
             });
         }
 
@@ -200,9 +261,77 @@ namespace FireDetectionLayout.Revit.ViewModels
 
             var s = _lastPlan.Summary;
             SummaryLine = $"Compartments: {s.TotalCompartments} (Green: {s.GreenCount}, Amber: {s.AmberCount}, Red: {s.RedCount}, Skipped: {s.SkippedCount}) | Detectors: {s.TotalSmokeDetectors} | Open edges: {s.UnresolvedOpenEdgeCount}";
-            StatusMessage = $"Solved level '{snapshot.Metadata.LevelName}' ({snapshot.Walls.Count} wall segments, {snapshot.Ceilings.Count} ceilings).";
-            CanCommit = s.TotalSmokeDetectors > 0;
+            StatusMessage = $"Solved level '{snapshot.Metadata.LevelName}' ({snapshot.Walls.Count} wall segments, {snapshot.Ceilings.Count} ceilings, {snapshot.Soffits.Count} soffits).";
+            UpdateCanCommit();
             SelectedCompartment = Compartments.FirstOrDefault();
+        }
+
+        public void LoadFamiliesFromDocument(Document doc)
+        {
+            ApplyDetectorFamilies(CollectDetectorFamilies(doc));
+        }
+
+        private static List<FamilySymbolOption> CollectDetectorFamilies(Document doc)
+        {
+            return new FilteredElementCollector(doc)
+                .OfCategory(BuiltInCategory.OST_FireAlarmDevices)
+                .OfClass(typeof(FamilySymbol))
+                .Cast<FamilySymbol>()
+                .OrderBy(s => s.FamilyName, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(s => s.Name, StringComparer.OrdinalIgnoreCase)
+                .Select(s => new FamilySymbolOption(s.Id, s.FamilyName ?? string.Empty, s.Name ?? string.Empty))
+                .ToList();
+        }
+
+        private void ApplyDetectorFamilies(IReadOnlyList<FamilySymbolOption> families)
+        {
+            void Update()
+            {
+                string? previousDisplay = SelectedDetectorFamily?.DisplayName;
+                ElementId? previousId = SelectedDetectorFamily?.SymbolId;
+
+                AvailableDetectorFamilies.Clear();
+                foreach (var family in families)
+                    AvailableDetectorFamilies.Add(family);
+
+                FamilySymbolOption? match = null;
+                if (previousId != null)
+                    match = AvailableDetectorFamilies.FirstOrDefault(f => f.SymbolId.Equals(previousId));
+                if (match == null && !string.IsNullOrEmpty(previousDisplay))
+                    match = AvailableDetectorFamilies.FirstOrDefault(f =>
+                        string.Equals(f.DisplayName, previousDisplay, StringComparison.OrdinalIgnoreCase));
+                if (match == null)
+                    match = AvailableDetectorFamilies.FirstOrDefault(IsLikelySmokeDetector)
+                        ?? AvailableDetectorFamilies.FirstOrDefault();
+
+                SelectedDetectorFamily = match;
+                UpdateCanCommit();
+            }
+
+            var dispatcher = System.Windows.Application.Current?.Dispatcher;
+            if (dispatcher != null && !dispatcher.CheckAccess())
+                dispatcher.BeginInvoke(new Action(Update));
+            else
+                Update();
+        }
+
+        private static bool IsLikelySmokeDetector(FamilySymbolOption option)
+        {
+            string text = option.DisplayName.ToLowerInvariant();
+            return text.Contains("smoke") || text.Contains("detector") || text.Contains("photoelectric");
+        }
+
+        private void UpdateCanCommit()
+        {
+            CanCommit = !IsBusy &&
+                        _lastPlan != null &&
+                        _lastPlan.Summary.TotalSmokeDetectors > 0 &&
+                        SelectedDetectorFamily != null;
+        }
+
+        partial void OnSelectedDetectorFamilyChanged(FamilySymbolOption? value)
+        {
+            UpdateCanCommit();
         }
 
         public void QueuePreviewRefresh()

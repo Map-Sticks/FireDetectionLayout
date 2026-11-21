@@ -27,7 +27,9 @@ namespace FireDetectionLayout.Core.Solver
 
             double refCeilingZ = snapshot.Ceilings.Count > 0
                 ? snapshot.Ceilings.Average(c => c.UndersideElevationMm)
-                : snapshot.Metadata.LevelElevationMm + snapshot.Metadata.DefaultCeilingHeightMm;
+                : snapshot.Soffits.Count > 0
+                    ? snapshot.Soffits.Average(s => s.UndersideElevationMm)
+                    : snapshot.Metadata.LevelElevationMm + snapshot.Metadata.DefaultCeilingHeightMm;
 
             // Stage 1: Physical smoke compartments from walls & ceiling-level downstands.
             var polyResult = _polygonizer.BuildCompartments(
@@ -67,7 +69,8 @@ namespace FireDetectionLayout.Core.Solver
                     compPoly,
                     snapshot.Ceilings,
                     refCeilingZ,
-                    rules.Ceilings);
+                    rules.Ceilings,
+                    snapshot.Soffits);
 
                 compartment.CeilingKind = ceilingAnalysis.Kind;
                 compartment.CeilingElevationMm = Math.Round(ceilingAnalysis.DominantElevationMm, 1);
@@ -90,9 +93,14 @@ namespace FireDetectionLayout.Core.Solver
                     compartment.Notes.Add($"{existingInComp.Count} existing fire device(s) already in compartment.");
                 }
 
-                // Withhold automatic placement when ceiling is unrecognized/missing/sloped.
-                if (ceilingAnalysis.Kind == CeilingKind.ExposedOrNone ||
-                    ceilingAnalysis.Kind == CeilingKind.Sloped ||
+                // Flag exposed soffit / no-ceiling spaces as Amber for review, but still solve and allow placement.
+                if (ceilingAnalysis.Kind == CeilingKind.ExposedOrNone && compartment.Status == CompartmentStatus.Green)
+                {
+                    compartment.Status = CompartmentStatus.Amber;
+                }
+
+                // Withhold automatic placement when ceiling is unrecognized or sloped.
+                if (ceilingAnalysis.Kind == CeilingKind.Sloped ||
                     ceilingAnalysis.Kind == CeilingKind.Unknown)
                 {
                     compartment.Status = CompartmentStatus.Red;
@@ -645,6 +653,14 @@ namespace FireDetectionLayout.Core.Solver
                 else if (ceilingAnalysis.Kind == CeilingKind.Plasterboard)
                 {
                     note = "Aligned to plasterboard room symmetry.";
+                }
+                else if (ceilingAnalysis.Kind == CeilingKind.ExposedOrNone)
+                {
+                    hostCeilingId = ceilingAnalysis.PrimarySoffit?.ElementId;
+                    hostKind = CeilingKind.ExposedOrNone;
+                    note = ceilingAnalysis.PrimarySoffit != null
+                        ? "Placed on exposed soffit (no ceiling) - confirm mounting."
+                        : "Placed at fallback elevation (no ceiling/soffit) - confirm mounting.";
                 }
 
                 // Flag MEP clearance conflicts (diffusers / luminaires / sprinklers).

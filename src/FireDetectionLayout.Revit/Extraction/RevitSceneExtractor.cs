@@ -23,6 +23,13 @@ namespace FireDetectionLayout.Revit.Extraction
 
             Level level = activeView.GenLevel;
             double levelElevMm = level.Elevation * FtToMm;
+            double? nextLevelElevMm = FindNextLevelElevationMm(hostDoc, levelElevMm);
+            double ceilingBandAboveMm = nextLevelElevMm.HasValue
+                ? Math.Max(nextLevelElevMm.Value - levelElevMm, 2500.0)
+                : 10000.0;
+            double soffitBandAboveMm = nextLevelElevMm.HasValue
+                ? Math.Max(nextLevelElevMm.Value - levelElevMm + 200.0, 6500.0)
+                : 10000.0;
 
             var snapshot = new SceneSnapshot
             {
@@ -37,7 +44,7 @@ namespace FireDetectionLayout.Revit.Extraction
                 }
             };
 
-            ExtractFromDocument(hostDoc, Transform.Identity, "Host", levelElevMm, snapshot);
+            ExtractFromDocument(hostDoc, Transform.Identity, "Host", levelElevMm, ceilingBandAboveMm, soffitBandAboveMm, snapshot);
 
             var links = new FilteredElementCollector(hostDoc)
                 .OfClass(typeof(RevitLinkInstance))
@@ -52,10 +59,22 @@ namespace FireDetectionLayout.Revit.Extraction
 
                 string linkName = link.Name;
                 snapshot.Metadata.IncludedLinks.Add(linkName);
-                ExtractFromDocument(linkDoc, link.GetTotalTransform(), linkName, levelElevMm, snapshot);
+                ExtractFromDocument(linkDoc, link.GetTotalTransform(), linkName, levelElevMm, ceilingBandAboveMm, soffitBandAboveMm, snapshot);
             }
 
             return snapshot;
+        }
+
+        private static double? FindNextLevelElevationMm(Document hostDoc, double activeLevelElevMm)
+        {
+            return new FilteredElementCollector(hostDoc)
+                .OfClass(typeof(Level))
+                .Cast<Level>()
+                .Select(l => l.Elevation * FtToMm)
+                .Where(z => z > activeLevelElevMm + 1500.0)
+                .OrderBy(z => z)
+                .Cast<double?>()
+                .FirstOrDefault();
         }
 
         private static void ExtractFromDocument(
@@ -63,10 +82,12 @@ namespace FireDetectionLayout.Revit.Extraction
             Transform tf,
             string sourceName,
             double targetLevelElevMm,
+            double ceilingBandAboveMm,
+            double soffitBandAboveMm,
             SceneSnapshot snapshot)
         {
             const double levelBandBelowMm = 500.0;
-            const double levelBandAboveMm = 5500.0;
+            double levelBandAboveMm = ceilingBandAboveMm;
 
             // 1. Physical walls in the active level vertical band.
             var walls = new FilteredElementCollector(doc)
@@ -126,7 +147,7 @@ namespace FireDetectionLayout.Revit.Extraction
                 if (minZ < targetLevelElevMm + 1500.0 || minZ > targetLevelElevMm + levelBandAboveMm)
                     continue;
 
-                var footprint = ExtractCeilingFootprint(ceiling, tf);
+                var footprint = ExtractBottomFaceFootprint(ceiling, tf);
                 if (footprint == null || footprint.OuterRing.Count < 3)
                     continue;
 
@@ -146,6 +167,10 @@ namespace FireDetectionLayout.Revit.Extraction
                     TileGrid = TryExtractTileGrid(doc, ceiling, ceilingType, tf)
                 });
             }
+
+            // 2B. Overhead slabs and roofs (concrete / structural soffits for shell spaces without ceilings).
+            ExtractSoffits<Floor>(doc, tf, sourceName, targetLevelElevMm, soffitBandAboveMm, snapshot);
+            ExtractSoffits<RoofBase>(doc, tf, sourceName, targetLevelElevMm, soffitBandAboveMm, snapshot);
 
             // 3. Rooms strictly matched to the target level elevation.
             var rooms = new FilteredElementCollector(doc)
@@ -261,10 +286,56 @@ namespace FireDetectionLayout.Revit.Extraction
             }
         }
 
-        private static Polygon2D? ExtractCeilingFootprint(Ceiling ceiling, Transform tf)
+        private static void ExtractSoffits<TElement>(
+            Document doc,
+            Transform tf,
+            string sourceName,
+            double targetLevelElevMm,
+            double soffitBandAboveMm,
+            SceneSnapshot snapshot)
+            where TElement : Element
+        {
+            var elements = new FilteredElementCollector(doc)
+                .OfClass(typeof(TElement))
+                .WhereElementIsNotElementType()
+                .Cast<TElement>();
+
+            foreach (var elem in elements)
+            {
+                BoundingBoxXYZ? bb = elem.get_BoundingBox(null);
+                if (bb == null)
+                    continue;
+
+                double minZ = tf.OfPoint(bb.Min).Z * FtToMm;
+                double maxZ = tf.OfPoint(bb.Max).Z * FtToMm;
+                if (minZ < targetLevelElevMm + 1500.0 || minZ > targetLevelElevMm + soffitBandAboveMm)
+                    continue;
+
+                var footprint = ExtractBottomFaceFootprint(elem, tf);
+                if (footprint == null || footprint.OuterRing.Count < 3)
+                    continue;
+
+                var elemType = doc.GetElement(elem.GetTypeId()) as HostObjAttributes;
+                string typeName = elemType?.Name ?? elem.Name;
+                string materialName = ExtractPrimaryMaterialName(doc, elemType);
+
+                snapshot.Soffits.Add(new CeilingSurface
+                {
+                    ElementId = RevitIds.GetKey(elem.Id),
+                    SourceModel = sourceName,
+                    TypeName = typeName,
+                    MaterialName = materialName,
+                    UndersideElevationMm = Math.Round(minZ, 1),
+                    TopElevationMm = Math.Round(maxZ, 1),
+                    Footprint = footprint
+                });
+            }
+        }
+
+        private static Polygon2D? ExtractBottomFaceFootprint(Element element, Transform tf)
         {
             var opt = new Options { ComputeReferences = false, DetailLevel = ViewDetailLevel.Coarse };
-            GeometryElement? geom = ceiling.get_Geometry(opt);
+            GeometryElement? geom = element.get_Geometry(opt);
             if (geom == null)
                 return null;
 
@@ -329,12 +400,12 @@ namespace FireDetectionLayout.Revit.Extraction
             return polygon.OuterRing.Count >= 3 ? polygon : null;
         }
 
-        private static string ExtractPrimaryMaterialName(Document doc, CeilingType? ceilingType)
+        private static string ExtractPrimaryMaterialName(Document doc, HostObjAttributes? hostType)
         {
-            if (ceilingType == null)
+            if (hostType == null)
                 return string.Empty;
 
-            var cs = ceilingType.GetCompoundStructure();
+            var cs = hostType.GetCompoundStructure();
             if (cs == null)
                 return string.Empty;
 
