@@ -30,7 +30,9 @@ Revit Atomic Commit ◀──(PlacementPlan)──  Dockable Review Panel (Green
    - Physical walls and downstands in the ceiling smoke-layer band define the true smoke compartments (ignoring Revit Room Separator lines and low partitions).
    - Baseline AS 1670.1 spacing is solved against the physical compartment first.
    - Ceilings are then classified (`SuspendedTile`, `Plasterboard`, `MixedFinish`, `ExposedOrNone`, `Sloped`) and coordinated with tile grids and MEP obstacles.
-   - Every snapped/coordinated point is re-verified against wall-reach and neighbour-spacing limits; failures escalate automatically or mark the compartment `Red`.
+   - Irregular compartments use visibility-constrained coverage candidates. Sampled points on exterior walls, interior rings, and the compartment interior must be within wall reach of a detector along a segment covered by the compartment polygon.
+   - Mixed-finish layouts try tile-centre-only coverage first; plasterboard-margin candidates are introduced only if the tile field cannot cover the full compartment.
+   - Every coordinated point is re-verified against visibility reach, wall clearance, and neighbour-spacing limits; failures escalate automatically or mark the compartment `Red`.
 
 ---
 
@@ -70,6 +72,7 @@ All thresholds live in an editable `RuleProfile` (JSON per project), never hardc
 ## 4. User Control & Safety Guarantees
 
 - **Traffic-Light Grading:** `Green` (auto-ready), `Amber` (review/confirm), `Red` (withheld—open wall edge, ambiguous ceiling, or coverage gap).
+- **Live Preview:** A registered `DirectContext3D` server draws status-colored compartment outlines, unresolved edges, approved detector markers, and wall-reach rings without creating Revit elements.
 - **Explicit Confirmation:** No Revit elements are created until the user reviews the plan and confirms.
 - **Single Atomic Transaction:** All placements occur in one Revit transaction (`Ctrl+Z` reverts the entire run).
 - **Tool Ownership Tagging:** Tool-created elements carry a metadata tag so re-runs never overwrite manually placed devices.

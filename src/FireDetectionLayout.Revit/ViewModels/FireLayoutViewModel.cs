@@ -2,6 +2,7 @@ using System;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -22,6 +23,8 @@ namespace FireDetectionLayout.Revit.ViewModels
 
         private SceneSnapshot? _lastSnapshot;
         private PlacementPlan? _lastPlan;
+        private ElementId? _analysisViewId;
+        private int _solveGeneration;
 
         [ObservableProperty]
         private string _statusMessage = "Open an RCP or Floor Plan and click Analyze Active Level.";
@@ -38,6 +41,18 @@ namespace FireDetectionLayout.Revit.ViewModels
         [ObservableProperty]
         private bool _canCommit;
 
+        [ObservableProperty]
+        private bool _isBusy;
+
+        [ObservableProperty]
+        private bool _isPreviewEnabled;
+
+        [ObservableProperty]
+        private SmokeCompartment? _selectedCompartment;
+
+        [ObservableProperty]
+        private string _selectedCompartmentDetails = "Select a compartment to review its analysis notes.";
+
         public ObservableCollection<SmokeCompartment> Compartments { get; } = new ObservableCollection<SmokeCompartment>();
 
         [RelayCommand]
@@ -53,8 +68,9 @@ namespace FireDetectionLayout.Revit.ViewModels
                     return;
                 }
 
+                _analysisViewId = uidoc.ActiveView.Id;
                 _lastSnapshot = _extractor.ExtractActiveLevel(uidoc.Document, uidoc.ActiveView);
-                RunSolver();
+                StartSolver(_lastSnapshot);
             });
         }
 
@@ -66,7 +82,7 @@ namespace FireDetectionLayout.Revit.ViewModels
                 StatusMessage = "Run Analyze Active Level first.";
                 return;
             }
-            RunSolver();
+            StartSolver(_lastSnapshot);
         }
 
         [RelayCommand]
@@ -132,25 +148,94 @@ namespace FireDetectionLayout.Revit.ViewModels
             });
         }
 
-        private void RunSolver()
+        private void StartSolver(SceneSnapshot snapshot)
         {
-            if (_lastSnapshot == null)
-                return;
-
+            int generation = ++_solveGeneration;
             var profile = RuleProfile.CreateAs1670Default();
             profile.SmokeDetection.MaxDetectorSpacingMm = MaxSpacingMm;
             profile.SmokeDetection.MaxWallDistanceMm = MaxWallReachMm;
+            var dispatcher = System.Windows.Application.Current?.Dispatcher;
+            if (dispatcher == null)
+                throw new InvalidOperationException("The WPF dispatcher is unavailable for solver results.");
 
-            _lastPlan = _engine.Solve(_lastSnapshot, profile);
+            IsBusy = true;
+            CanCommit = false;
+            StatusMessage = "Solving visibility-constrained detector coverage...";
 
+            Task.Run(() => _engine.Solve(snapshot, profile)).ContinueWith(task =>
+            {
+                dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (generation != _solveGeneration)
+                        return;
+
+                    IsBusy = false;
+                    if (task.IsFaulted)
+                    {
+                        var error = task.Exception?.GetBaseException();
+                        StatusMessage = $"Solver failed: {error?.Message ?? "Unknown error."}";
+                        CanCommit = false;
+                        return;
+                    }
+
+                    if (task.IsCanceled)
+                    {
+                        StatusMessage = "Solver was cancelled.";
+                        CanCommit = false;
+                        return;
+                    }
+
+                    ApplySolverResult(snapshot, task.Result);
+                    QueuePreviewRefresh();
+                }));
+            }, TaskScheduler.Default);
+        }
+
+        private void ApplySolverResult(SceneSnapshot snapshot, PlacementPlan plan)
+        {
+            _lastPlan = plan;
             Compartments.Clear();
             foreach (var comp in _lastPlan.Compartments)
                 Compartments.Add(comp);
 
             var s = _lastPlan.Summary;
-            SummaryLine = $"Compartments: {s.TotalCompartments} (Green: {s.GreenCount}, Amber: {s.AmberCount}, Red: {s.RedCount}, Skipped: {s.SkippedCount}) | Detectors: {s.TotalSmokeDetectors}";
-            StatusMessage = $"Solved level '{_lastSnapshot.Metadata.LevelName}' ({_lastSnapshot.Walls.Count} wall segments, {_lastSnapshot.Ceilings.Count} ceilings).";
+            SummaryLine = $"Compartments: {s.TotalCompartments} (Green: {s.GreenCount}, Amber: {s.AmberCount}, Red: {s.RedCount}, Skipped: {s.SkippedCount}) | Detectors: {s.TotalSmokeDetectors} | Open edges: {s.UnresolvedOpenEdgeCount}";
+            StatusMessage = $"Solved level '{snapshot.Metadata.LevelName}' ({snapshot.Walls.Count} wall segments, {snapshot.Ceilings.Count} ceilings).";
             CanCommit = s.TotalSmokeDetectors > 0;
+            SelectedCompartment = Compartments.FirstOrDefault();
+        }
+
+        public void QueuePreviewRefresh()
+        {
+            Application.EventHandler.Raise(uiApp =>
+            {
+                var uidoc = uiApp.ActiveUIDocument;
+                if (uidoc == null)
+                    return;
+
+                UpdatePreview(uidoc);
+            });
+        }
+
+        private void UpdatePreview(UIDocument uidoc)
+        {
+            var viewId = _analysisViewId ?? uidoc.ActiveView.Id;
+            Application.PreviewServer?.SetPreview(_lastPlan, MaxWallReachMm, viewId, IsPreviewEnabled);
+            uidoc.RefreshActiveView();
+        }
+
+        partial void OnIsPreviewEnabledChanged(bool value)
+        {
+            QueuePreviewRefresh();
+        }
+
+        partial void OnSelectedCompartmentChanged(SmokeCompartment? value)
+        {
+            SelectedCompartmentDetails = value == null
+                ? "Select a compartment to review its analysis notes."
+                : value.Notes.Count == 0
+                    ? "No review notes."
+                    : string.Join(Environment.NewLine, value.Notes);
         }
     }
 }

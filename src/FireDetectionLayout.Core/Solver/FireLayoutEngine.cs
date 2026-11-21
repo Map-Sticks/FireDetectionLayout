@@ -101,20 +101,52 @@ namespace FireDetectionLayout.Core.Solver
                     continue;
                 }
 
-                // Stage 2: Baseline AS 1670.1 spacing (walls-first).
-                var baselinePoints = ComputeBaselinePoints(compPoly, compNts, rules.SmokeDetection);
+                // Stage 2: Build a visibility-constrained coverage layout.
+                var targets = BuildCoverageTargets(compNts, rules.SmokeDetection);
+                var layoutCandidates = BuildLayoutCandidates(compNts, compPoly, ceilingAnalysis, rules);
+                CoverageSelection selected;
+                bool requiredMarginSpill = false;
+                if (ceilingAnalysis.Kind == CeilingKind.MixedFinish)
+                {
+                    selected = SelectCoverageCandidates(
+                        compNts,
+                        targets,
+                        layoutCandidates.Where(c => c.IsTile).ToList(),
+                        rules.SmokeDetection);
+                    if (!selected.IsComplete)
+                    {
+                        selected = SelectCoverageCandidates(compNts, targets, layoutCandidates, rules.SmokeDetection);
+                        requiredMarginSpill = selected.Candidates.Any(c => !c.IsTile);
+                    }
+                }
+                else
+                {
+                    selected = SelectCoverageCandidates(compNts, targets, layoutCandidates, rules.SmokeDetection);
+                }
 
-                // Stage 3B: Coordinate with ceiling type (tile grid vs plasterboard) & MEP clearances.
+                if (requiredMarginSpill)
+                {
+                    compartment.Status = CompartmentStatus.Amber;
+                    compartment.Notes.Add("Tile-only placement cannot cover the full compartment; plasterboard margin spillover is required.");
+                }
+
+                if (!selected.IsComplete)
+                {
+                    compartment.Status = CompartmentStatus.Red;
+                    compartment.IsApprovedForPlacement = false;
+                    compartment.Notes.Add($"Visibility-constrained coverage is incomplete ({selected.UncoveredTargetCount} uncovered sample point(s)).");
+                }
+
+                // Stage 3B: Coordinate selected positions with MEP clearances.
                 var coordinatedDevices = CoordinateWithCeiling(
                     compartment,
-                    compNts,
-                    baselinePoints,
+                    selected.Candidates,
                     ceilingAnalysis,
                     snapshot.Obstacles,
                     rules);
 
                 // Stage 4: Post-snap compliance verification & grading.
-                VerifyAndGradeCompartment(compartment, compNts, coordinatedDevices, rules.SmokeDetection);
+                VerifyAndGradeCompartment(compartment, compNts, targets, coordinatedDevices, rules.SmokeDetection);
 
                 compartment.ProposedDetectorCount = coordinatedDevices.Count(d => d.Role == DeviceRole.SmokeDetector);
                 compartment.ProposedSpeakerCount = coordinatedDevices.Count(d => d.Role == DeviceRole.EwisSpeaker);
@@ -156,52 +188,422 @@ namespace FireDetectionLayout.Core.Solver
             return roomRules.ExcludeKeywords.Any(k => !string.IsNullOrWhiteSpace(k) && combined.Contains(k.ToLowerInvariant()));
         }
 
-        private static List<Point2D> ComputeBaselinePoints(Polygon2D compPoly, Polygon compNts, As1670_1Rules rules)
+        private sealed class LayoutCandidate
         {
-            var bounds = compPoly.GetBounds();
-            double width = bounds.Width;
-            double height = bounds.Height;
+            public Point2D Location { get; set; } = new Point2D();
+            public bool IsTile { get; set; }
+            public double WallClearanceMm { get; set; }
+        }
 
-            int nx = Math.Max(1, (int)Math.Ceiling(width / rules.MaxDetectorSpacingMm));
-            int ny = Math.Max(1, (int)Math.Ceiling(height / rules.MaxDetectorSpacingMm));
+        private sealed class CoverageSelection
+        {
+            public List<LayoutCandidate> Candidates { get; } = new List<LayoutCandidate>();
+            public int UncoveredTargetCount { get; set; }
+            public bool IsComplete => UncoveredTargetCount == 0;
+        }
 
-            // Keep single central detector if the whole compartment is within wall reach of the interior point.
-            var interiorPt = compNts.InteriorPoint;
-            var center = new Point2D(interiorPt.X, interiorPt.Y);
-            if (nx == 1 && ny == 1 && MaxBoundaryDistance(compNts, new[] { center }) <= rules.MaxWallDistanceMm)
+        private static List<Point2D> BuildCoverageTargets(Polygon compartment, As1670_1Rules rules)
+        {
+            var targets = new List<Point2D>();
+            var targetKeys = new HashSet<long>();
+            AddRingTargets(compartment.ExteriorRing.Coordinates, targets, targetKeys);
+            for (int i = 0; i < compartment.NumInteriorRings; i++)
+                AddRingTargets(compartment.GetInteriorRingN(i).Coordinates, targets, targetKeys);
+
+            var bounds = compartment.EnvelopeInternal;
+            double step = Math.Max(500.0, Math.Min(rules.MaxDetectorSpacingMm * 0.5, rules.MaxWallDistanceMm));
+            for (double x = bounds.MinX + step * 0.5; x < bounds.MaxX; x += step)
             {
-                return new List<Point2D> { center };
+                for (double y = bounds.MinY + step * 0.5; y < bounds.MaxY; y += step)
+                {
+                    var point = new Point(x, y);
+                    if (compartment.Contains(point))
+                        AddUniqueTarget(targets, targetKeys, new Point2D(x, y));
+                }
             }
 
-            double stepX = width / nx;
-            double stepY = height / ny;
+            var interior = compartment.InteriorPoint;
+            AddUniqueTarget(targets, targetKeys, new Point2D(interior.X, interior.Y));
+            return targets;
+        }
 
-            var points = new List<Point2D>(nx * ny);
+        private static void AddRingTargets(
+            Coordinate[] coordinates,
+            List<Point2D> targets,
+            HashSet<long> targetKeys)
+        {
+            for (int i = 0; i < coordinates.Length - 1; i++)
+            {
+                var a = coordinates[i];
+                var b = coordinates[i + 1];
+                double length = a.Distance(b);
+                int samples = Math.Max(1, (int)Math.Ceiling(length / 500.0));
+                for (int sample = 0; sample <= samples; sample++)
+                {
+                    double t = (double)sample / samples;
+                    AddUniqueTarget(targets, targetKeys, new Point2D(
+                        a.X + (b.X - a.X) * t,
+                        a.Y + (b.Y - a.Y) * t));
+                }
+            }
+        }
+
+        private static void AddUniqueTarget(List<Point2D> targets, HashSet<long> targetKeys, Point2D candidate)
+        {
+            if (targetKeys.Add(GetPointKey(candidate)))
+                targets.Add(candidate);
+        }
+
+        private static List<LayoutCandidate> BuildLayoutCandidates(
+            Polygon compartment,
+            Polygon2D compartmentPolygon,
+            CompartmentCeilingAnalysis ceiling,
+            RuleProfile rules)
+        {
+            var result = new List<LayoutCandidate>();
+            var candidateKeys = new HashSet<long>();
+            var tile = ceiling.PrimaryTileCeiling;
+            Polygon? tileFootprint = tile != null && tile.Footprint.OuterRing.Count >= 3
+                ? WallGraphPolygonizer.ToNtsPolygon(tile.Footprint)
+                : null;
+
+            if (tile != null && tile.TileGrid != null &&
+                tile.TileGrid.PitchUMm > 0 && tile.TileGrid.PitchVMm > 0)
+            {
+                AddTileCenterCandidates(
+                    compartment, compartmentPolygon, tileFootprint, tile.TileGrid,
+                    rules.SmokeDetection, result, candidateKeys);
+            }
+
+            bool mixed = ceiling.Kind == CeilingKind.MixedFinish;
+            bool tileOnly = ceiling.Kind == CeilingKind.SuspendedTile &&
+                            tile != null && tile.TileGrid != null &&
+                            tile.TileGrid.PitchUMm > 0 && tile.TileGrid.PitchVMm > 0;
+            if (!tileOnly)
+                AddGeneralCandidates(
+                    compartment, compartmentPolygon, rules.SmokeDetection, tileFootprint,
+                    mixed, result, candidateKeys);
+
+            if (result.Count == 0 && !tileOnly && (!mixed || tileFootprint == null))
+            {
+                var interior = compartment.InteriorPoint;
+                AddCandidate(
+                    compartment, result, new Point2D(interior.X, interior.Y), false,
+                    rules.SmokeDetection, candidateKeys);
+            }
+
+            result.Sort((left, right) => right.WallClearanceMm.CompareTo(left.WallClearanceMm));
+            return result;
+        }
+
+        private static void AddTileCenterCandidates(
+            Polygon compartment,
+            Polygon2D compartmentPolygon,
+            Polygon? tileFootprint,
+            TileGridSpec grid,
+            As1670_1Rules rules,
+            List<LayoutCandidate> candidates,
+            HashSet<long> candidateKeys)
+        {
+            var bounds = compartment.EnvelopeInternal;
+            var corners = new[]
+            {
+                new Point2D(bounds.MinX, bounds.MinY),
+                new Point2D(bounds.MinX, bounds.MaxY),
+                new Point2D(bounds.MaxX, bounds.MinY),
+                new Point2D(bounds.MaxX, bounds.MaxY)
+            };
+            double minU = double.PositiveInfinity, minV = double.PositiveInfinity;
+            double maxU = double.NegativeInfinity, maxV = double.NegativeInfinity;
+            foreach (var corner in corners)
+            {
+                double dx = corner.X - grid.OriginMm.X;
+                double dy = corner.Y - grid.OriginMm.Y;
+                double u = dx * grid.AxisU.X + dy * grid.AxisU.Y;
+                double v = dx * grid.AxisV.X + dy * grid.AxisV.Y;
+                minU = Math.Min(minU, u);
+                minV = Math.Min(minV, v);
+                maxU = Math.Max(maxU, u);
+                maxV = Math.Max(maxV, v);
+            }
+
+            int minIndexU = (int)Math.Floor(minU / grid.PitchUMm);
+            int minIndexV = (int)Math.Floor(minV / grid.PitchVMm);
+            int maxIndexU = (int)Math.Ceiling(maxU / grid.PitchUMm);
+            int maxIndexV = (int)Math.Ceiling(maxV / grid.PitchVMm);
+            for (int indexU = minIndexU; indexU <= maxIndexU; indexU++)
+            {
+                for (int indexV = minIndexV; indexV <= maxIndexV; indexV++)
+                {
+                    var point = GetTileCenter(indexU, indexV, grid);
+                    if (tileFootprint == null || tileFootprint.Contains(new Point(point.X, point.Y)))
+                        AddCandidate(compartment, candidates, point, true, rules, candidateKeys);
+                }
+            }
+
+            var polygonBounds = compartmentPolygon.GetBounds();
+            int nx = Math.Max(1, (int)Math.Ceiling(polygonBounds.Width / rules.MaxDetectorSpacingMm));
+            int ny = Math.Max(1, (int)Math.Ceiling(polygonBounds.Height / rules.MaxDetectorSpacingMm));
             for (int ix = 0; ix < nx; ix++)
             {
                 for (int iy = 0; iy < ny; iy++)
                 {
-                    double x = bounds.MinX + (ix + 0.5) * stepX;
-                    double y = bounds.MinY + (iy + 0.5) * stepY;
-                    var candidate = new Point2D(x, y);
+                    AddSnappedTileCandidate(compartment, tileFootprint, grid, rules, candidates, candidateKeys,
+                        new Point2D(
+                            polygonBounds.MinX + (ix + 0.5) * polygonBounds.Width / nx,
+                            polygonBounds.MinY + (iy + 0.5) * polygonBounds.Height / ny));
+                }
+            }
 
-                    if (compNts.Contains(new Point(x, y)))
+            double candidateStep = Math.Max(1000.0, rules.MaxWallDistanceMm);
+            for (double x = polygonBounds.MinX + candidateStep * 0.5; x < polygonBounds.MaxX; x += candidateStep)
+            {
+                for (double y = polygonBounds.MinY + candidateStep * 0.5; y < polygonBounds.MaxY; y += candidateStep)
+                    AddSnappedTileCandidate(
+                        compartment, tileFootprint, grid, rules, candidates, candidateKeys, new Point2D(x, y));
+            }
+        }
+
+        private static void AddSnappedTileCandidate(
+            Polygon compartment,
+            Polygon? tileFootprint,
+            TileGridSpec grid,
+            As1670_1Rules rules,
+            List<LayoutCandidate> candidates,
+            HashSet<long> candidateKeys,
+            Point2D point)
+        {
+            double dx = point.X - grid.OriginMm.X;
+            double dy = point.Y - grid.OriginMm.Y;
+            double u = dx * grid.AxisU.X + dy * grid.AxisU.Y;
+            double v = dx * grid.AxisV.X + dy * grid.AxisV.Y;
+            int baseIndexU = (int)Math.Floor(u / grid.PitchUMm);
+            int baseIndexV = (int)Math.Floor(v / grid.PitchVMm);
+            Point2D? bestCenter = null;
+            double bestDistance = double.PositiveInfinity;
+            for (int indexU = baseIndexU - 1; indexU <= baseIndexU + 1; indexU++)
+            {
+                for (int indexV = baseIndexV - 1; indexV <= baseIndexV + 1; indexV++)
+                {
+                    var center = GetTileCenter(indexU, indexV, grid);
+                    if (tileFootprint != null && !tileFootprint.Contains(new Point(center.X, center.Y)))
+                        continue;
+
+                    double distance = center.DistanceTo(point);
+                    if (distance < bestDistance)
                     {
-                        points.Add(candidate);
+                        bestCenter = center;
+                        bestDistance = distance;
                     }
                 }
             }
 
-            if (points.Count == 0)
-                points.Add(center);
+            if (bestCenter != null)
+                AddCandidate(compartment, candidates, bestCenter, true, rules, candidateKeys);
+        }
 
-            return points;
+        private static Point2D GetTileCenter(int indexU, int indexV, TileGridSpec grid)
+        {
+            double u = (indexU + 0.5) * grid.PitchUMm;
+            double v = (indexV + 0.5) * grid.PitchVMm;
+            return new Point2D(
+                grid.OriginMm.X + u * grid.AxisU.X + v * grid.AxisV.X,
+                grid.OriginMm.Y + u * grid.AxisU.Y + v * grid.AxisV.Y);
+        }
+
+        private static void AddGeneralCandidates(
+            Polygon compartment,
+            Polygon2D compartmentPolygon,
+            As1670_1Rules rules,
+            Polygon? tileFootprint,
+            bool restrictToMargin,
+            List<LayoutCandidate> candidates,
+            HashSet<long> candidateKeys)
+        {
+            var bounds = compartmentPolygon.GetBounds();
+            int nx = Math.Max(1, (int)Math.Ceiling(bounds.Width / rules.MaxDetectorSpacingMm));
+            int ny = Math.Max(1, (int)Math.Ceiling(bounds.Height / rules.MaxDetectorSpacingMm));
+            double cellWidth = bounds.Width / nx;
+            double cellHeight = bounds.Height / ny;
+            for (int ix = 0; ix < nx; ix++)
+            {
+                for (int iy = 0; iy < ny; iy++)
+                {
+                    AddCandidate(compartment, candidates, new Point2D(
+                        bounds.MinX + (ix + 0.5) * cellWidth,
+                        bounds.MinY + (iy + 0.5) * cellHeight), false, rules, candidateKeys,
+                        tileFootprint, restrictToMargin);
+                }
+            }
+
+            double step = Math.Max(1000.0, rules.MaxWallDistanceMm);
+            for (double x = bounds.MinX + step * 0.5; x < bounds.MaxX; x += step)
+            {
+                for (double y = bounds.MinY + step * 0.5; y < bounds.MaxY; y += step)
+                {
+                    AddCandidate(
+                        compartment, candidates, new Point2D(x, y), false, rules, candidateKeys,
+                        tileFootprint, restrictToMargin);
+                }
+            }
+
+            var interior = compartment.InteriorPoint;
+            AddCandidate(
+                compartment, candidates, new Point2D(interior.X, interior.Y), false, rules, candidateKeys,
+                tileFootprint, restrictToMargin);
+        }
+
+        private static void AddCandidate(
+            Polygon compartment,
+            List<LayoutCandidate> candidates,
+            Point2D location,
+            bool isTile,
+            As1670_1Rules rules,
+            HashSet<long> candidateKeys,
+            Polygon? tileFootprint = null,
+            bool restrictToMargin = false)
+        {
+            var point = new Point(location.X, location.Y);
+            if (!compartment.Contains(point) ||
+                compartment.Boundary.Distance(point) < rules.HardMinWallClearanceMm)
+                return;
+
+            bool insideTile = tileFootprint != null && tileFootprint.Contains(point);
+            if (restrictToMargin && insideTile)
+                return;
+            if (!candidateKeys.Add(GetPointKey(location)))
+                return;
+
+            candidates.Add(new LayoutCandidate
+            {
+                Location = location,
+                IsTile = isTile,
+                WallClearanceMm = compartment.Boundary.Distance(point)
+            });
+        }
+
+        private static long GetPointKey(Point2D point)
+        {
+            long x = (long)Math.Round(point.X);
+            long y = (long)Math.Round(point.Y);
+            return PackCoordinates(x, y);
+        }
+
+        private static long GetGridKey(Point2D point, double cellSize) =>
+            GetGridKey((long)Math.Floor(point.X / cellSize), (long)Math.Floor(point.Y / cellSize));
+
+        private static long GetGridKey(long x, long y) => PackCoordinates(x, y);
+
+        private static long PackCoordinates(long x, long y) =>
+            (x << 32) ^ (y & 0xFFFFFFFFL);
+
+        private static CoverageSelection SelectCoverageCandidates(
+            Polygon compartment,
+            IReadOnlyList<Point2D> targets,
+            IReadOnlyList<LayoutCandidate> candidates,
+            As1670_1Rules rules)
+        {
+            var result = new CoverageSelection();
+            var remaining = new HashSet<int>(Enumerable.Range(0, targets.Count));
+            var visibility = new List<int[]>(candidates.Count);
+            double cellSize = Math.Max(1.0, rules.MaxWallDistanceMm);
+            var targetCells = new Dictionary<long, List<int>>();
+            for (int i = 0; i < targets.Count; i++)
+            {
+                long key = GetGridKey(targets[i], cellSize);
+                if (!targetCells.TryGetValue(key, out var cellTargets))
+                {
+                    cellTargets = new List<int>();
+                    targetCells.Add(key, cellTargets);
+                }
+
+                cellTargets.Add(i);
+            }
+
+            foreach (var candidate in candidates)
+            {
+                var visibleTargets = new List<int>();
+                long cellX = (long)Math.Floor(candidate.Location.X / cellSize);
+                long cellY = (long)Math.Floor(candidate.Location.Y / cellSize);
+                for (long x = cellX - 1; x <= cellX + 1; x++)
+                {
+                    for (long y = cellY - 1; y <= cellY + 1; y++)
+                    {
+                        if (!targetCells.TryGetValue(GetGridKey(x, y), out var cellTargets))
+                            continue;
+
+                        foreach (int i in cellTargets)
+                        {
+                            if (candidate.Location.DistanceTo(targets[i]) > rules.MaxWallDistanceMm)
+                                continue;
+
+                            if (VisibilityGeometry.IsVisible(compartment, candidate.Location, targets[i]))
+                                visibleTargets.Add(i);
+                        }
+                    }
+                }
+                visibility.Add(visibleTargets.ToArray());
+            }
+
+            for (int i = 0; i < visibility.Count; i++)
+            {
+                if (visibility[i].Length == targets.Count)
+                {
+                    result.Candidates.Add(candidates[i]);
+                    return result;
+                }
+            }
+
+            if (candidates.Count <= 250 && targets.Count <= 2000)
+            {
+                var visibleSets = visibility.Select(v => new HashSet<int>(v)).ToList();
+                for (int i = 0; i < candidates.Count; i++)
+                {
+                    for (int j = i + 1; j < candidates.Count; j++)
+                    {
+                        if (Enumerable.Range(0, targets.Count).All(t =>
+                                visibleSets[i].Contains(t) || visibleSets[j].Contains(t)))
+                        {
+                            result.Candidates.Add(candidates[i]);
+                            result.Candidates.Add(candidates[j]);
+                            return result;
+                        }
+                    }
+                }
+            }
+
+            while (remaining.Count > 0)
+            {
+                int best = -1;
+                int bestCoverage = 0;
+                for (int i = 0; i < candidates.Count; i++)
+                {
+                    int count = visibility[i].Count(remaining.Contains);
+                    if (count > bestCoverage || (count == bestCoverage && count > 0 &&
+                        ((candidates[i].IsTile && best >= 0 && !candidates[best].IsTile) ||
+                         (best >= 0 && candidates[i].IsTile == candidates[best].IsTile &&
+                          candidates[i].WallClearanceMm > candidates[best].WallClearanceMm))))
+                    {
+                        best = i;
+                        bestCoverage = count;
+                    }
+                }
+
+                if (best < 0 || bestCoverage == 0)
+                    break;
+
+                result.Candidates.Add(candidates[best]);
+                foreach (int target in visibility[best])
+                    remaining.Remove(target);
+            }
+
+            result.UncoveredTargetCount = remaining.Count;
+            return result;
         }
 
         private static List<ProposedDevice> CoordinateWithCeiling(
             SmokeCompartment compartment,
-            Polygon compNts,
-            List<Point2D> baselinePoints,
+            IReadOnlyList<LayoutCandidate> selectedCandidates,
             CompartmentCeilingAnalysis ceilingAnalysis,
             IReadOnlyList<MepObstacle> obstacles,
             RuleProfile rules)
@@ -214,45 +616,31 @@ namespace FireDetectionLayout.Core.Solver
                                && tileCeiling.TileGrid.PitchUMm > 0
                                && tileCeiling.TileGrid.PitchVMm > 0;
 
-            Polygon? tileFootprintNts = tileCeiling != null && tileCeiling.Footprint.OuterRing.Count >= 3
-                ? WallGraphPolygonizer.ToNtsPolygon(tileCeiling.Footprint)
-                : null;
-
-            foreach (var rawPt in baselinePoints)
+            foreach (var selected in selectedCandidates)
             {
-                Point2D target = rawPt;
-                bool snappedToTile = false;
+                Point2D target = selected.Location;
+                bool snappedToTile = selected.IsTile;
                 string? hostCeilingId = ceilingAnalysis.PrimaryCeiling?.ElementId;
                 CeilingKind hostKind = ceilingAnalysis.Kind;
                 string note = string.Empty;
 
-                if (canSnapTile && tileCeiling?.TileGrid != null)
+                if (selected.IsTile && canSnapTile && tileCeiling?.TileGrid != null)
                 {
-                    var snapped = SnapToTileCenter(rawPt, tileCeiling.TileGrid);
-                    var snappedNts = new Point(snapped.X, snapped.Y);
-                    bool insideComp = compNts.Contains(snappedNts);
-                    bool insideTile = tileFootprintNts == null || tileFootprintNts.Contains(snappedNts);
-
-                    if (insideComp && insideTile)
+                    hostCeilingId = tileCeiling.ElementId;
+                    hostKind = CeilingKind.SuspendedTile;
+                    note = tileCeiling.TileGrid.IsOriginVerified
+                        ? "Selected full-tile centre."
+                        : "Selected pattern-grid centre (origin unverified - confirm).";
+                    if (!tileCeiling.TileGrid.IsOriginVerified)
                     {
-                        target = snapped;
-                        snappedToTile = true;
-                        hostCeilingId = tileCeiling.ElementId;
-                        hostKind = CeilingKind.SuspendedTile;
-                        note = tileCeiling.TileGrid.IsOriginVerified
-                            ? "Snapped to verified tile centre."
-                            : "Snapped to pattern grid (origin unverified - confirm).";
-                        if (!tileCeiling.TileGrid.IsOriginVerified)
-                        {
-                            compartment.Status = CompartmentStatus.Amber;
-                        }
-                    }
-                    else if (ceilingAnalysis.Kind == CeilingKind.MixedFinish)
-                    {
-                        hostKind = CeilingKind.Plasterboard;
-                        note = "Placed on plasterboard margin to maintain wall reach.";
                         compartment.Status = CompartmentStatus.Amber;
                     }
+                }
+                else if (ceilingAnalysis.Kind == CeilingKind.MixedFinish && !selected.IsTile)
+                {
+                    hostKind = CeilingKind.Plasterboard;
+                    note = "Placed on plasterboard margin to maintain full-compartment visibility reach.";
+                    compartment.Status = CompartmentStatus.Amber;
                 }
                 else if (ceilingAnalysis.Kind == CeilingKind.Plasterboard)
                 {
@@ -282,25 +670,6 @@ namespace FireDetectionLayout.Core.Solver
             }
 
             return devices;
-        }
-
-        private static Point2D SnapToTileCenter(Point2D pt, TileGridSpec grid)
-        {
-            double dx = pt.X - grid.OriginMm.X;
-            double dy = pt.Y - grid.OriginMm.Y;
-
-            double u = dx * grid.AxisU.X + dy * grid.AxisU.Y;
-            double v = dx * grid.AxisV.X + dy * grid.AxisV.Y;
-
-            double tileIndexU = Math.Floor(u / grid.PitchUMm) + 0.5;
-            double tileIndexV = Math.Floor(v / grid.PitchVMm) + 0.5;
-
-            double snappedU = tileIndexU * grid.PitchUMm;
-            double snappedV = tileIndexV * grid.PitchVMm;
-
-            return new Point2D(
-                grid.OriginMm.X + snappedU * grid.AxisU.X + snappedV * grid.AxisV.X,
-                grid.OriginMm.Y + snappedU * grid.AxisU.Y + snappedV * grid.AxisV.Y);
         }
 
         private static bool CheckObstacleConflict(
@@ -334,6 +703,7 @@ namespace FireDetectionLayout.Core.Solver
         private static void VerifyAndGradeCompartment(
             SmokeCompartment compartment,
             Polygon compNts,
+            IReadOnlyList<Point2D> targets,
             List<ProposedDevice> devices,
             As1670_1Rules rules)
         {
@@ -350,7 +720,7 @@ namespace FireDetectionLayout.Core.Solver
                 return;
             }
 
-            double worstWallDist = MaxBoundaryDistance(compNts, detectorPts);
+            double worstWallDist = MaxVisibleReach(compNts, targets, detectorPts);
             compartment.WorstCaseWallDistanceMm = Math.Round(worstWallDist, 0);
 
             double maxSpacing = 0.0;
@@ -368,11 +738,19 @@ namespace FireDetectionLayout.Core.Solver
             }
             compartment.MaxDeviceSpacingMm = Math.Round(maxSpacing, 0);
 
+            if (targets.Any(target => detectorPts.All(detector =>
+                    detector.DistanceTo(target) > rules.MaxWallDistanceMm ||
+                    !VisibilityGeometry.IsVisible(compNts, detector, target))))
+            {
+                compartment.Status = CompartmentStatus.Red;
+                compartment.IsApprovedForPlacement = false;
+                compartment.Notes.Add("Post-coordination visibility coverage failed; one or more sampled points are beyond wall reach or occluded.");
+            }
+
             // Check min wall clearance for every detector.
-            var boundaryGeom = compNts.ExteriorRing;
             foreach (var pt in detectorPts)
             {
-                double wallDist = boundaryGeom.Distance(new Point(pt.X, pt.Y));
+                double wallDist = compNts.Boundary.Distance(new Point(pt.X, pt.Y));
                 if (wallDist < rules.HardMinWallClearanceMm)
                 {
                     compartment.Status = CompartmentStatus.Red;
@@ -392,25 +770,26 @@ namespace FireDetectionLayout.Core.Solver
                 compartment.IsApprovedForPlacement = false;
                 compartment.Notes.Add($"Worst-case wall reach {worstWallDist:F0} mm exceeds limit {rules.MaxWallDistanceMm:F0} mm.");
             }
+
+            if (maxSpacing > rules.MaxDetectorSpacingMm * 1.02)
+            {
+                compartment.Status = CompartmentStatus.Red;
+                compartment.IsApprovedForPlacement = false;
+                compartment.Notes.Add($"Nearest-neighbour detector spacing {maxSpacing:F0} mm exceeds limit {rules.MaxDetectorSpacingMm:F0} mm.");
+            }
         }
 
-        private static double MaxBoundaryDistance(Polygon compNts, IReadOnlyList<Point2D> detectors)
+        private static double MaxVisibleReach(Polygon compNts, IReadOnlyList<Point2D> targets, IReadOnlyList<Point2D> detectors)
         {
             double worst = 0.0;
-            var coords = compNts.ExteriorRing.Coordinates;
-            for (int i = 0; i < coords.Length - 1; i++)
+            foreach (var target in targets)
             {
-                var a = new Point2D(coords[i].X, coords[i].Y);
-                var b = new Point2D(coords[i + 1].X, coords[i + 1].Y);
-                double len = a.DistanceTo(b);
-                int samples = Math.Max(1, (int)Math.Ceiling(len / 500.0));
-                for (int s = 0; s <= samples; s++)
-                {
-                    double t = (double)s / samples;
-                    var p = new Point2D(a.X + (b.X - a.X) * t, a.Y + (b.Y - a.Y) * t);
-                    double nearest = detectors.Min(d => d.DistanceTo(p));
-                    if (nearest > worst) worst = nearest;
-                }
+                double nearest = detectors
+                    .Where(detector => VisibilityGeometry.IsVisible(compNts, detector, target))
+                    .Select(detector => detector.DistanceTo(target))
+                    .DefaultIfEmpty(double.PositiveInfinity)
+                    .Min();
+                if (nearest > worst) worst = nearest;
             }
             return worst;
         }

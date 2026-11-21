@@ -63,6 +63,91 @@ namespace FireDetectionLayout.Tests
         }
 
         [Fact]
+        public void Solve_LShapedRoomPlacesDetectorsOnlyInVisibleCompartmentArea()
+        {
+            var area = new Polygon2D
+            {
+                OuterRing = new List<Point2D>
+                {
+                    new Point2D(0, 0), new Point2D(10000, 0), new Point2D(10000, 4000),
+                    new Point2D(4000, 4000), new Point2D(4000, 10000), new Point2D(0, 10000)
+                }
+            };
+            var plan = new FireLayoutEngine().Solve(BuildSnapshot(area, "Gyprock Plasterboard"));
+
+            var compartment = Assert.Single(plan.Compartments);
+            Assert.Equal(CompartmentStatus.Green, compartment.Status);
+            Assert.True(plan.Devices.Count >= 2);
+            Assert.All(plan.Devices, device =>
+            {
+                Assert.True(device.Location.X <= 4000 || device.Location.Y <= 4000);
+            });
+        }
+
+        [Fact]
+        public void Solve_MixedFinishUsesTileCentresWhenTheyCoverTheCompartment()
+        {
+            var area = RectanglePolygon(0, 0, 8000, 6000);
+            var snapshot = BuildSnapshot(area, "13mm Flush Plasterboard");
+            snapshot.Ceilings.Add(new CeilingSurface
+            {
+                ElementId = "TileField",
+                TypeName = "1200x600 Acoustic Tile",
+                UndersideElevationMm = 2700,
+                TileGrid = new TileGridSpec
+                {
+                    OriginMm = new Point2D(0, 0),
+                    AxisU = new Point2D(1, 0),
+                    AxisV = new Point2D(0, 1),
+                    PitchUMm = 1200,
+                    PitchVMm = 600,
+                    IsOriginVerified = true
+                },
+                Footprint = RectanglePolygon(500, 500, 7500, 5500)
+            });
+
+            var plan = new FireLayoutEngine().Solve(snapshot);
+
+            var compartment = Assert.Single(plan.Compartments);
+            Assert.Equal(CeilingKind.MixedFinish, compartment.CeilingKind);
+            Assert.True(
+                compartment.Status == CompartmentStatus.Green,
+                $"{compartment.Status}: {string.Join("; ", compartment.Notes)}");
+            Assert.All(plan.Devices, device => Assert.True(device.WasSnappedToTile));
+        }
+
+        [Fact]
+        public void Solve_MixedFinishSpillsToMarginWhenTileFieldCannotReachOuterWalls()
+        {
+            var area = RectanglePolygon(0, 0, 20000, 8000);
+            var snapshot = BuildSnapshot(area, "13mm Flush Plasterboard");
+            snapshot.Ceilings.Add(new CeilingSurface
+            {
+                ElementId = "TileField",
+                TypeName = "1200x600 Acoustic Tile",
+                UndersideElevationMm = 2700,
+                TileGrid = new TileGridSpec
+                {
+                    OriginMm = new Point2D(0, 0),
+                    AxisU = new Point2D(1, 0),
+                    AxisV = new Point2D(0, 1),
+                    PitchUMm = 1200,
+                    PitchVMm = 600,
+                    IsOriginVerified = true
+                },
+                Footprint = RectanglePolygon(8000, 1000, 12000, 7000)
+            });
+
+            var plan = new FireLayoutEngine().Solve(snapshot);
+
+            var compartment = Assert.Single(plan.Compartments);
+            Assert.Equal(CeilingKind.MixedFinish, compartment.CeilingKind);
+            Assert.Equal(CompartmentStatus.Amber, compartment.Status);
+            Assert.Contains(compartment.Notes, note => note.Contains("plasterboard margin spillover"));
+            Assert.Contains(plan.Devices, device => !device.WasSnappedToTile);
+        }
+
+        [Fact]
         public void SnapshotSerializer_RoundTripsSnapshotAndPlan()
         {
             var snapshot = BuildRectangularRoomSnapshot(6000, 4000, "Plasterboard", null);
@@ -128,5 +213,60 @@ namespace FireDetectionLayout.Tests
                 }
             };
         }
+
+        private static SceneSnapshot BuildSnapshot(Polygon2D area, string ceilingType)
+        {
+            var snapshot = new SceneSnapshot
+            {
+                Metadata = new SnapshotMetadata
+                {
+                    DocumentTitle = "TestModel.rvt",
+                    LevelName = "Level 1",
+                    LevelElevationMm = 0,
+                    DefaultCeilingHeightMm = 2700
+                },
+                Ceilings = new List<CeilingSurface>
+                {
+                    new CeilingSurface
+                    {
+                        ElementId = "Ceiling",
+                        TypeName = ceilingType,
+                        UndersideElevationMm = 2700,
+                        Footprint = area
+                    }
+                }
+            };
+
+            AddWalls(area.OuterRing, snapshot.Walls);
+            foreach (var hole in area.Holes)
+                AddWalls(hole, snapshot.Walls);
+
+            return snapshot;
+        }
+
+        private static void AddWalls(IReadOnlyList<Point2D> ring, List<WallBarrier> walls)
+        {
+            for (int i = 0; i < ring.Count; i++)
+            {
+                walls.Add(new WallBarrier
+                {
+                    Centerline = new Segment2D(ring[i], ring[(i + 1) % ring.Count]),
+                    BaseElevationMm = 0,
+                    TopElevationMm = 3000
+                });
+            }
+        }
+
+        private static Polygon2D RectanglePolygon(double x1, double y1, double x2, double y2) =>
+            new Polygon2D
+            {
+                OuterRing = new List<Point2D>
+                {
+                    new Point2D(x1, y1),
+                    new Point2D(x2, y1),
+                    new Point2D(x2, y2),
+                    new Point2D(x1, y2)
+                }
+            };
     }
 }
