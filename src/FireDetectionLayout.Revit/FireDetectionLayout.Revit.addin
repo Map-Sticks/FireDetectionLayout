@@ -1,0 +1,14 @@
+<RevitAddIns>
+  <AddIn Type="Application">
+    <Name>FireDetectionLayout</Name>
+    <Assembly>FireDetectionLayout.Revit\FireDetectionLayout.Revit.dll</Assembly>
+    <AddInId>8F4A2C91-3D7E-4B15-9A62-7E1C8D504F23</AddInId>
+    <FullClassName>FireDetectionLayout.Revit.Application</FullClassName>
+    <VendorId>MapSticks</VendorId>
+    <VendorDescription>AS 1670.1 / AS 1670.4 Fire Detection Layout Tool</VendorDescription>
+  </AddIn>
+  <ManifestSettings>
+    <UseRevitContext>False</UseRevitContext>
+    <ContextName>FireDetectionLayout</ContextName>
+  </ManifestSettings>
+</RevitAddIns>

@@ -1,0 +1,72 @@
+<Page x:Class="FireDetectionLayout.Revit.UI.FireLayoutPane"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      Title="Fire Detection Layout"
+      Background="#FAFAFA">
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Margin="0,0,0,8">
+            <TextBlock Text="Fire Detection Layout (AS 1670.1 / AS 1670.4)"
+                       FontSize="14" FontWeight="SemiBold" Foreground="#1F2937"/>
+            <TextBlock Text="{Binding StatusMessage}"
+                       FontSize="11" Foreground="#4B5563" TextWrapping="Wrap" Margin="0,2,0,0"/>
+        </StackPanel>
+
+        <WrapPanel Grid.Row="1" Margin="0,0,0,8">
+            <StackPanel Orientation="Horizontal" Margin="0,0,12,4">
+                <TextBlock Text="Max Spacing (mm):" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <TextBox Width="68" Text="{Binding MaxSpacingMm, UpdateSourceTrigger=PropertyChanged}"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,12,4">
+                <TextBlock Text="Max Wall Reach (mm):" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <TextBox Width="68" Text="{Binding MaxWallReachMm, UpdateSourceTrigger=PropertyChanged}"/>
+            </StackPanel>
+        </WrapPanel>
+
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,8">
+            <Button Content="Analyze Active Level" Command="{Binding AnalyzeActiveLevelCommand}"
+                    Padding="10,5" Margin="0,0,6,0" FontWeight="SemiBold"/>
+            <Button Content="Re-Solve" Command="{Binding ReSolveCommand}"
+                    Padding="10,5" Margin="0,0,6,0"/>
+            <Button Content="Export Snapshot JSON" Command="{Binding ExportSnapshotCommand}"
+                    Padding="10,5"/>
+        </StackPanel>
+
+        <DataGrid Grid.Row="3"
+                  ItemsSource="{Binding Compartments}"
+                  AutoGenerateColumns="False"
+                  CanUserAddRows="False"
+                  IsReadOnly="False"
+                  HeadersVisibility="Column"
+                  GridLinesVisibility="Horizontal">
+            <DataGrid.Columns>
+                <DataGridCheckBoxColumn Header="Place" Binding="{Binding IsApprovedForPlacement}" Width="48"/>
+                <DataGridTextColumn Header="Status" Binding="{Binding Status}" IsReadOnly="True" Width="62"/>
+                <DataGridTextColumn Header="Compartment / Room" Binding="{Binding DisplayName}" IsReadOnly="True" Width="*"/>
+                <DataGridTextColumn Header="Ceiling" Binding="{Binding CeilingKind}" IsReadOnly="True" Width="95"/>
+                <DataGridTextColumn Header="Detectors" Binding="{Binding ProposedDetectorCount}" IsReadOnly="True" Width="68"/>
+                <DataGridTextColumn Header="Wall Max (mm)" Binding="{Binding WorstCaseWallDistanceMm}" IsReadOnly="True" Width="92"/>
+            </DataGrid.Columns>
+        </DataGrid>
+
+        <Grid Grid.Row="4" Margin="0,8,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0" Text="{Binding SummaryLine}" VerticalAlignment="Center"
+                       FontSize="11" Foreground="#374151" TextWrapping="Wrap"/>
+            <Button Grid.Column="1" Content="Place Approved Devices"
+                    Command="{Binding CommitApprovedCommand}"
+                    IsEnabled="{Binding CanCommit}"
+                    Padding="12,6" FontWeight="SemiBold"/>
+        </Grid>
+    </Grid>
+</Page>
