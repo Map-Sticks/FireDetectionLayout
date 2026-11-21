@@ -148,6 +148,44 @@ namespace FireDetectionLayout.Tests
         }
 
         [Fact]
+        public void Solve_InvalidCeilingWithholdsOnlyAffectedCompartment()
+        {
+            var snapshot = BuildSnapshot(RectanglePolygon(0, 0, 6000, 6000), "Plasterboard");
+            var invalidCeiling = snapshot.Ceilings[0];
+            invalidCeiling.ElementId = "C-Invalid";
+            invalidCeiling.Footprint = new Polygon2D
+            {
+                OuterRing = new List<Point2D>
+                {
+                    new Point2D(0, 0), new Point2D(6000, 6000),
+                    new Point2D(0, 6000), new Point2D(6000, 0)
+                }
+            };
+            var otherArea = RectanglePolygon(10000, 0, 14000, 4000);
+            AddWalls(otherArea.OuterRing, snapshot.Walls);
+            snapshot.Ceilings.Add(new CeilingSurface
+            {
+                ElementId = "C-Valid",
+                TypeName = "Plasterboard",
+                UndersideElevationMm = 2700,
+                Footprint = otherArea
+            });
+
+            var plan = new FireLayoutEngine().Solve(snapshot);
+
+            Assert.Equal(2, plan.Compartments.Count);
+            var withheld = Assert.Single(plan.Compartments, c => c.CeilingKind == CeilingKind.Unknown);
+            Assert.Equal(CompartmentStatus.Red, withheld.Status);
+            Assert.False(withheld.IsApprovedForPlacement);
+            Assert.Contains(withheld.Notes, note => note.Contains("C-Invalid"));
+            var approved = Assert.Single(plan.Compartments, c => c.CeilingKind == CeilingKind.Plasterboard);
+            Assert.Equal(CompartmentStatus.Green, approved.Status);
+            Assert.True(approved.IsApprovedForPlacement);
+            var device = Assert.Single(plan.Devices);
+            Assert.Equal(approved.CompartmentId, device.CompartmentId);
+        }
+
+        [Fact]
         public void SnapshotSerializer_RoundTripsSnapshotAndPlan()
         {
             var snapshot = BuildRectangularRoomSnapshot(6000, 4000, "Plasterboard", null);

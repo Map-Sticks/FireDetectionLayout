@@ -50,6 +50,60 @@ namespace FireDetectionLayout.Tests
             Assert.Equal(CeilingKind.ExposedOrNone, analysis.Kind);
         }
 
+        [Fact]
+        public void AnalyzeCompartment_NearlyCoincidentEdgesPreserveCeilingHoleArea()
+        {
+            double x = -1520.8249999998925;
+            double y = 2744.7875000000017;
+            var compartment = RectPoly(x, y, x + 8000, y + 6000);
+            var footprint = RectPoly(x - 1e-9, y - 1e-9, x + 8000 + 1e-9, y + 6000 + 1e-9);
+            footprint.Holes.Add(RectPoly(x + 2000, y + 2000, x + 4000, y + 4000).OuterRing);
+            var ceiling = new CeilingSurface
+            {
+                ElementId = "C-Precision",
+                TypeName = "Plasterboard",
+                UndersideElevationMm = 2850,
+                Footprint = footprint
+            };
+
+            var analysis = new CeilingClassifier().AnalyzeCompartment(
+                compartment, new[] { ceiling }, 2700, RuleProfile.CreateAs1670Default().Ceilings);
+
+            Assert.Equal(CeilingKind.Plasterboard, analysis.Kind);
+            Assert.Equal(11.0 / 12.0, analysis.CoverageRatio, 8);
+            Assert.Equal(11.0 / 12.0, analysis.PlasterboardShareRatio, 8);
+            Assert.Same(ceiling, analysis.PrimaryCeiling);
+            Assert.Equal(2850, analysis.DominantElevationMm);
+        }
+
+        [Fact]
+        public void AnalyzeCompartment_SelfIntersectingCeilingIsWithheldWithSourceDiagnostic()
+        {
+            var ceiling = new CeilingSurface
+            {
+                ElementId = "C-Invalid",
+                SourceModel = "Architecture",
+                TypeName = "Plasterboard",
+                Footprint = new Polygon2D
+                {
+                    OuterRing = new List<Point2D>
+                    {
+                        new Point2D(0, 0), new Point2D(6000, 6000),
+                        new Point2D(0, 6000), new Point2D(6000, 0)
+                    }
+                }
+            };
+
+            var analysis = new CeilingClassifier().AnalyzeCompartment(
+                RectPoly(0, 0, 6000, 6000), new[] { ceiling }, 2700,
+                RuleProfile.CreateAs1670Default().Ceilings);
+
+            Assert.Equal(CeilingKind.Unknown, analysis.Kind);
+            Assert.Null(analysis.PrimaryCeiling);
+            Assert.Contains(analysis.Notes, note =>
+                note.Contains("Architecture") && note.Contains("C-Invalid") && note.Contains("Self-intersection"));
+        }
+
         private static Polygon2D RectPoly(double x1, double y1, double x2, double y2) =>
             new Polygon2D
             {

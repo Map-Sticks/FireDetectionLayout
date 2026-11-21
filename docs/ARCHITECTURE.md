@@ -32,6 +32,7 @@ Revit Atomic Commit ◀──(PlacementPlan)──  Dockable Review Panel (Green
    - Ceilings are then classified (`SuspendedTile`, `Plasterboard`, `MixedFinish`, `ExposedOrNone`, `Sloped`) and coordinated with tile grids and MEP obstacles.
    - Irregular compartments use visibility-constrained coverage candidates. Sampled points on exterior walls, interior rings, and the compartment interior must be within wall reach of a detector along a segment covered by the compartment polygon.
    - Mixed-finish layouts try tile-centre-only coverage first; plasterboard-margin candidates are introduced only if the tile field cannot cover the full compartment.
+   - Ceiling overlaps use robust OverlayNG intersection for near-coincident transformed edges, preserving footprint holes. Invalid boundaries or unrecoverable overlaps produce `Unknown` ceiling classification with source/element diagnostics; the affected compartment is `Red` with placement withheld rather than aborting the floor solve or silently repairing its geometry.
    - Every coordinated point is re-verified against visibility reach, wall clearance, and neighbour-spacing limits; failures escalate automatically or mark the compartment `Red`.
 
 ---

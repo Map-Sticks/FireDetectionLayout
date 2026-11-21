@@ -3,6 +3,9 @@ using System.Collections.Generic;
 using System.Linq;
 using FireDetectionLayout.Core.Models;
 using NetTopologySuite.Geometries;
+using NetTopologySuite.Operation.Overlay;
+using NetTopologySuite.Operation.OverlayNG;
+using NetTopologySuite.Operation.Valid;
 
 namespace FireDetectionLayout.Core.Geometry
 {
@@ -54,14 +57,17 @@ namespace FireDetectionLayout.Core.Geometry
                 DominantElevationMm = fallbackElevationMm
             };
 
-            if (ceilings.Count == 0 || compartmentPolygon.OuterRing.Count < 3)
+            if (ceilings.Count == 0)
             {
                 analysis.Kind = CeilingKind.ExposedOrNone;
                 analysis.Notes.Add("No ceiling detected in compartment.");
                 return analysis;
             }
 
-            var compNts = WallGraphPolygonizer.ToNtsPolygon(compartmentPolygon);
+            var compNts = CreateValidatedPolygon(compartmentPolygon, "compartment boundary", analysis);
+            if (compNts == null)
+                return analysis;
+
             double compArea = compNts.Area;
             if (compArea <= 1.0)
                 return analysis;
@@ -72,17 +78,28 @@ namespace FireDetectionLayout.Core.Geometry
 
             foreach (var ceiling in ceilings)
             {
-                if (ceiling.Footprint.OuterRing.Count < 3)
-                    continue;
-
                 if (!compBounds.Intersects(ceiling.Footprint.GetBounds(), 10.0))
                     continue;
 
-                var ceilNts = WallGraphPolygonizer.ToNtsPolygon(ceiling.Footprint);
-                if (!compNts.Intersects(ceilNts))
-                    continue;
+                string ceilingLabel = $"ceiling '{ceiling.SourceModel}:{ceiling.ElementId}'";
+                var ceilNts = CreateValidatedPolygon(ceiling.Footprint, ceilingLabel, analysis);
+                if (ceilNts == null)
+                    return analysis;
 
-                double overlap = compNts.Intersection(ceilNts).Area;
+                double overlap;
+                try
+                {
+                    // Legacy overlay can fail on near-coincident edges after Revit unit/link transforms.
+                    overlap = OverlayNGRobust.Overlay(compNts, ceilNts, SpatialFunction.Intersection).Area;
+                }
+                catch (TopologyException error)
+                {
+                    analysis.Kind = CeilingKind.Unknown;
+                    analysis.Notes.Add(
+                        $"Overlap failed for {ceilingLabel}: {error.Message}. Automatic placement withheld.");
+                    return analysis;
+                }
+
                 if (overlap < 10_000.0) // < 0.01 m^2
                     continue;
 
@@ -152,6 +169,42 @@ namespace FireDetectionLayout.Core.Geometry
             }
 
             return analysis;
+        }
+
+        private static Polygon? CreateValidatedPolygon(
+            Polygon2D footprint,
+            string label,
+            CompartmentCeilingAnalysis analysis)
+        {
+            if (footprint.OuterRing.Count < 3 || footprint.Holes.Any(hole => hole.Count < 3))
+            {
+                analysis.Kind = CeilingKind.Unknown;
+                analysis.Notes.Add(
+                    $"Invalid {label}: a boundary ring has fewer than three points. Automatic placement withheld.");
+                return null;
+            }
+
+            Polygon polygon;
+            try
+            {
+                polygon = WallGraphPolygonizer.ToNtsPolygon(footprint);
+            }
+            catch (ArgumentException error)
+            {
+                analysis.Kind = CeilingKind.Unknown;
+                analysis.Notes.Add($"Invalid {label}: {error.Message}. Automatic placement withheld.");
+                return null;
+            }
+
+            var validationError = new IsValidOp(polygon).ValidationError;
+            if (validationError != null)
+            {
+                analysis.Kind = CeilingKind.Unknown;
+                analysis.Notes.Add($"Invalid {label}: {validationError}. Automatic placement withheld.");
+                return null;
+            }
+
+            return polygon;
         }
     }
 }
