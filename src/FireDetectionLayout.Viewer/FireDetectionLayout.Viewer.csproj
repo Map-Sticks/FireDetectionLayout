@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>FireDetectionLayout.Viewer</RootNamespace>
+    <AssemblyName>FireLayoutViewer</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FireDetectionLayout.Core\FireDetectionLayout.Core.csproj" />
+    <ProjectReference Include="..\FireDetectionLayout.Preview\FireDetectionLayout.Preview.csproj" />
+  </ItemGroup>
+
+</Project>

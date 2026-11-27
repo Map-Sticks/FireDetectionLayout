@@ -1,79 +1,105 @@
-# FireDetectionLayout — Architecture & Engineering Specification
+# FireDetectionLayout - Architecture & Engineering Specification
 
-## 1. Design Philosophy
+## 1. Pipeline
 
-`FireDetectionLayout` is a professional Revit add-in for automated, auditable **AS 1670.1** (smoke detection) and **AS 1670.4** (optional paired EWIS occupant warning speaker) layout and ceiling coordination.
-
-It follows a strict **Extract → Solve → Review → Commit** architecture:
+`FireDetectionLayout` lays out point detectors (smoke, heat) and EWIS speakers to **AS 1670.1 / AS 1670.4** style rules on a strict **Extract -> Solve -> Review -> Commit** pipeline:
 
 ```text
-Revit Host + Links  ──(SceneSnapshot)──▶  FireDetectionLayout.Core (Pure C#, No Revit API)
-                                                │
-                                                ├─ Stage 1: Physical Wall-Graph Smoke Compartments
-                                                ├─ Stage 2: AS 1670.1 / 1670.4 Baseline Spacing
-                                                ├─ Stage 3: Ceiling Recognition & Drafting Coordination
-                                                └─ Stage 4: Post-Snap Compliance Re-Check & Grading
-                                                │
-Revit Atomic Commit ◀──(PlacementPlan)──  Dockable Review Panel (Green / Amber / Red)
+Revit host + links --(SceneSnapshot)--> FireDetectionLayout.Core  (pure C#, no Revit API)
+                                          |- Stage 1: spaces from physical walls (+ Rooms / Spaces / ceilings)
+                                          |- Stage 2: grid-first layout per space, per device kind
+                                          |- Stage 3: ceiling tile coordination and hosting height
+                                          '- Stage 4: re-verification and grading
+                                          |
+Revit commit  <--(PlacementPlan)--  LayoutSession  <-->  Preview window (edit, regenerate, cancel)
 ```
 
-### Key Architectural Decisions
+| Project | Role |
+|---|---|
+| `FireDetectionLayout.Core` (`netstandard2.0`) | Geometry, solver, `LayoutSession`, JSON contracts, SVG renderer. Runs off the UI thread and outside Revit. |
+| `FireDetectionLayout.Preview` (`net48`, `net8.0-windows`) | `LayoutWorkspace`, `LayoutCanvas`, `LayoutPreviewWindow`. Knows nothing about Revit; the host plugs in Commit / Export / Import / Pick grid origin. |
+| `FireDetectionLayout.Revit` | Extraction, settings pane, placement, `DirectContext3D` overlay. Every Revit API call runs through one queued `ExternalEvent`. |
+| `FireDetectionLayout.Cli`, `FireDetectionLayout.Viewer` | The solver and the preview window hosted outside Revit for external assessment. |
 
-1. **Decoupled Solver (`FireDetectionLayout.Core`, `netstandard2.0`):**
-   - Zero Revit API dependencies.
-   - Runs on a background thread so Revit stays responsive.
-   - Supports JSON serialization of `SceneSnapshot`, `RuleProfile`, and `PlacementPlan` for offline debugging, QA archiving, and fast xUnit regression testing against real project floors.
-2. **Native Multi-Targeted Revit Add-in (`FireDetectionLayout.Revit`, `Nice3point.Revit.Sdk`):**
-   - Targets Revit 2023–2027 (`Debug.R23`..`Debug.R27` / `Release.R23`..`Release.R27`) in Visual Studio 2022 with automatic add-in deployment and F5 debugging.
-   - Extracts host + linked Architectural, Structural, and Mechanical geometry using link transforms and active view phase mapping.
-3. **Walls First, Ceilings Second (with Closed-Loop Re-Verification):**
-   - Physical walls and downstands in the ceiling smoke-layer band define the true smoke compartments (ignoring Revit Room Separator lines and low partitions).
-   - Baseline AS 1670.1 spacing is solved against the physical compartment first.
-   - Ceilings are then classified (`SuspendedTile`, `Plasterboard`, `MixedFinish`, `ExposedOrNone`, `Sloped`) and coordinated with tile grids and MEP obstacles.
-   - Irregular compartments use visibility-constrained coverage candidates. Sampled points on exterior walls, interior rings, and the compartment interior must be within wall reach of a detector along a segment covered by the compartment polygon.
-   - Mixed-finish layouts try tile-centre-only coverage first; plasterboard-margin candidates are introduced only if the tile field cannot cover the full compartment.
-   - Ceiling overlaps use robust OverlayNG intersection for near-coincident transformed edges, preserving footprint holes. Invalid boundaries or unrecoverable overlaps produce `Unknown` ceiling classification with source/element diagnostics; the affected compartment is `Red` with placement withheld rather than aborting the floor solve or silently repairing its geometry.
-   - Every coordinated point is re-verified against visibility reach, wall clearance, and neighbour-spacing limits; failures escalate automatically or mark the compartment `Red`.
+`SceneSnapshot` (what was read), `RuleProfile` (what is required) and `PlacementPlan` (what is proposed) are plain JSON, in millimetres in host model coordinates.
 
----
+## 2. Rules
 
-## 2. Engineering Rules (AS 1670.1 & AS 1670.4)
-
-All thresholds live in an editable `RuleProfile` (JSON per project), never hardcoded:
+All thresholds live in an editable `RuleProfile`, stored per project. Nothing below is hard-coded.
 
 | Parameter | Default (mm) | Notes |
 |---|---:|---|
-| Max detector-to-detector spacing | `10,000` | Flat ceiling baseline (editable to 7,000–9,000 mm for project spec margin) |
-| Max distance to physical wall | `5,000` | Half of max spacing |
-| Min wall / bulkhead clearance | `500` | Hard floor `300` mm |
-| Min AC supply diffuser clearance | `1,500` | Configurable `1,000`–`1,500` mm |
-| Min luminaire / sprinkler clearance | `300` | Avoids clash with ceiling fixtures |
-| Hold-open fire/smoke door trigger | `1,500` | Flags/seeds detector within 1.5 m of door |
-| Downstand / bulkhead barrier depth | `max(250, 0.10 × H)` | Deep beams/bulkheads split smoke pockets |
-| Concealed ceiling void review threshold | `800` | Flags voids > 800 mm for engineer review |
-| Paired detector + EWIS speaker pitch | `600` | Centres of 600×600 halves on a 1200×600 tile |
+| Smoke: max spacing / max to wall / min to wall | `10,000` / `5,000` / `500` | |
+| Heat: max spacing / max to wall / min to wall | `7,000` / `3,500` / `500` | Rooms matching the heat keywords (kitchen, car park, ...) default to heat |
+| Speaker: max spacing / max to wall / min to wall | `10,000` / `5,000` / `500` | AS 1670.4 prescribes none; defaults mirror the detector grid |
+| Absolute minimum to wall | `300` | Used only where a space is too small for the required minimum; flagged amber |
+| Detector to paired speaker | `600` | Flush ceilings; on tiles the pair follows the tile module |
+| Downstand / bulkhead barrier depth | `max(250, 0.10 x H)` | Deep downstands split exposed soffits |
+| Wall closure tolerance | `150` | Endpoint snapping when closing wall loops |
+| Luminaire / sprinkler / supply diffuser clearance | `300` / `300` / `1,500` | Reported, not enforced |
+| Flat-ceiling height limit | `6,000` | Above this the space is flagged for derating |
 
----
+**Maximum distance to a wall** is measured along the room's own X and Y axes (a square reach, not a circle), so a rotated room is judged in its own frame. It is measured to the wall face: an 11 m room needs two detectors, not one.
 
-## 3. Ceiling Coordination Strategy
+**Spacing** is the distance from each device to its nearest neighbour of the same kind.
 
-- **Suspended Acoustic Tile Grid (`1200×600`, `600×600`):**
-  - Revit 2025.3+: reads exact instance grid lines via `Ceiling.GetCeilingGridLines(False)`.
-  - Revit 2023–2025.2 fallback: reads fill-pattern pitch/orientation + cached per-ceiling 2-click origin.
-  - Snaps devices to full uncut tile centres (or 600×600 half-tile centres when paired with an EWIS speaker), never on T-bars or occupied MEP tiles.
-- **Plasterboard / Flush-Set:**
-  - Keeps architectural symmetry along room centrelines and dominant wall axes, nudging cleanly around luminaires/diffusers.
-- **Mixed Finish (Tiled Field + Plasterboard Margin):**
-  - Assesses AS 1670.1 reach over the full physical wall-bounded compartment (including the margin), prefers placing on full tiles, and only spills onto the plasterboard margin when wall reach requires it (flagged `Amber`).
-- **Exposed Soffit / No Ceiling / Sloped:**
-  - Explicitly flagged (`Amber`/`Red`) rather than silently placing at an assumed elevation.
+Room-type rules match whole words in the Room / Space name: exclude (riser, shaft, lift, ... but never "Lift Lobby"), detector only, speaker only, heat. They set the per-space defaults the user can override in the preview.
 
----
+## 3. Spaces
 
-## 4. User Control & Safety Guarantees
+1. **Walls first.** Walls and downstands that reach the smoke-layer band below the ceiling are noded and polygonised into closed loops. Low partitions and room-separation lines are ignored, so a wall-bounded open-plan area is one space however many Rooms sit in it.
+2. **Wall faces.** Loops are built on wall centrelines and then trimmed by each wall's thickness, so every distance is measured from the wall surface.
+3. **Exposed downstands.** A deep downstand above ceiling level is hidden where a ceiling passes beneath it and acts as a barrier where the soffit is exposed.
+4. **Recovery.** Any Room, MEP Space or ceiling footprint not already claimed by a wall loop becomes a space (with walls standing inside it cut out), so an unclosed loop never loses a room.
+5. **Scope.** When rooms are selected in Revit only the spaces containing them are kept.
 
-- **Traffic-Light Grading:** `Green` (auto-ready), `Amber` (review/confirm), `Red` (withheld—open wall edge, ambiguous ceiling, or coverage gap).
-- **Live Preview:** A registered `DirectContext3D` server draws status-colored compartment outlines, unresolved edges, approved detector markers, and wall-reach rings without creating Revit elements.
-- **Explicit Confirmation:** No Revit elements are created until the user reviews the plan and confirms.
-- **Single Atomic Transaction:** All placements occur in one Revit transaction (`Ctrl+Z` reverts the entire run).
-- **Tool Ownership Tagging:** Tool-created elements carry a metadata tag so re-runs never overwrite manually placed devices.
+## 4. Layout
+
+Every candidate is built from **regular room-aligned grids**. For a span `L` the node count per axis starts at `ceil(L / min(spacing, 2 x wall distance))`, with equal bays and a half bay at each wall.
+
+| Strategy | Used for |
+|---|---|
+| One grid over the whole space | Rectangular and near-rectangular rooms |
+| That grid plus infill on its half-lines | Open plan with a core or an odd corner (at most a quarter of the grid again) |
+| One grid per rectangular bay | L / T / U shapes and branching corridors, cut along the walls that meet at internal corners |
+| Coverage-driven set cover | Last resort; flagged amber |
+
+Candidates are ranked: required wall distance met, then fewest devices, then no fixture clashes, then the simpler arrangement. The ranked list is what **Regenerate** steps through.
+
+Coverage is checked on a room-aligned sampling of the ceiling. Each sampled patch is tested at its centre and at its far end in each of the four frame directions (the wall face for a perimeter patch); every probe must be within wall reach of a device that can see it, so devices do not get credit round corners or behind cores. Small column-sized holes do not block the view.
+
+### Detector + speaker
+
+- **Paired (default):** one grid, a speaker beside every detector; the tighter of the two rule sets governs.
+- **Independent:** each kind gets its own grid; where the two land on the same spot one is shifted beside the other, whichever keeps its own coverage compliant.
+
+### Ceiling coordination
+
+| Ceiling | Single device | Detector + speaker |
+|---|---|---|
+| `1200x600`, `1200x300` | Tile centre | Same tile, each centred in its own half (tile centre +/- 300 along the long side) |
+| `600x600` | Tile centre | Neighbouring tiles, each on its tile centre |
+| `300x300` | Tile centre | Tile centres 600 apart |
+| Flush / plasterboard | Grid node | Straddling the node along the room, 600 apart |
+| Tile field with flush margin | Tile centres first | Margin positions only when the tiles cannot reach the walls (amber) |
+| Exposed soffit / no ceiling | Grid node at soffit height | As flush (amber: confirm mounting) |
+| Sloped | Not laid out | |
+
+Tile snapping prefers, in order: required wall distance, a tile not occupied by a light or diffuser, an uncut tile. Equidistant tiles resolve towards the middle of the room so the layout stays symmetric. A tile arrangement that breaches the wall distance in a narrow corridor loses to one that does not, which is how the pair turns to follow the corridor whichever way the tiles run.
+
+Tile grid geometry comes from `Ceiling.GetCeilingGridLines` (Revit 2025.3+). Before that only the pattern size and direction are available; the origin is unverified (amber) until picked in the ceiling plan.
+
+Each device takes the underside height of the ceiling directly above it, so a bulkhead margin and the main ceiling are both hosted correctly.
+
+## 5. Review and safety
+
+- **Nothing is placed until committed.** The preview and the in-view overlay create no Revit elements.
+- **Every edit is re-verified.** Moving, adding or cancelling a device re-runs the same checks as the solver and updates the space's status and notes.
+- **Grading.** Green meets the rules. Amber needs a look. Red does not meet the rules: it is held back by default and placed only if the user ticks it.
+- **One transaction.** A whole commit is a single undo step.
+- **Ownership.** Placed devices are tagged `FIRE_LAYOUT_AUTO:<run>:<space>:<kind>` in Comments. A re-run replaces only its own devices in the spaces being placed.
+- **Placement.** Level-based families are placed on the level with an elevation offset; face-based families on the level plane, flipped to face down, with a host offset; a named reference plane is the fallback. Ceiling-hosted families need a ceiling in the host model.
+
+## 6. External assessment
+
+`Export package` writes the snapshot, the capture of the analysed view (with its model extents), the rule profile, the plan and an SVG. `firelayout solve` and `firelayout verify` run the same solver and checks headless; `FireLayoutViewer` is the same preview window. A plan from any source is imported by assigning each device to the space containing it and re-verifying it, so an externally produced layout is held to the same rules as a generated one.

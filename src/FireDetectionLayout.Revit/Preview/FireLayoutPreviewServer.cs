@@ -13,17 +13,21 @@ namespace FireDetectionLayout.Revit.Preview
         private static readonly Guid ServerId = new Guid("E8D02E36-02F4-4BFC-A3AC-FD11F8A8F30D");
         private const double MmToFt = 1.0 / 304.8;
         private const double MarkerHalfSizeMm = 150.0;
-        private const int CoverageCircleSegments = 48;
+
 
         private volatile PreviewLine[] _lines = Array.Empty<PreviewLine>();
         private volatile ElementId? _viewId;
         private volatile bool _enabled;
 
-        public void SetPreview(PlacementPlan? plan, double maxWallDistanceMm, ElementId viewId, bool enabled)
+        /// <summary>
+        /// Shows a plan in one view. <paramref name="wallReachMm"/> gives the wall reach drawn
+        /// around each detector kind; it is measured along the room axes, so it is drawn square.
+        /// </summary>
+        public void SetPreview(PlacementPlan? plan, Func<DeviceRole, double> wallReachMm, ElementId viewId, bool enabled)
         {
             _viewId = viewId;
             _enabled = enabled && plan != null;
-            _lines = plan == null ? Array.Empty<PreviewLine>() : BuildLines(plan, maxWallDistanceMm);
+            _lines = plan == null ? Array.Empty<PreviewLine>() : BuildLines(plan, wallReachMm);
         }
 
         public Guid GetServerId() => ServerId;
@@ -77,7 +81,7 @@ namespace FireDetectionLayout.Revit.Preview
             }
         }
 
-        private static PreviewLine[] BuildLines(PlacementPlan plan, double maxWallDistanceMm)
+        private static PreviewLine[] BuildLines(PlacementPlan plan, Func<DeviceRole, double> wallReachMm)
         {
             var lines = new List<PreviewLine>();
             foreach (var compartment in plan.Compartments)
@@ -106,34 +110,36 @@ namespace FireDetectionLayout.Revit.Preview
 
             var approvedIds = new HashSet<string>(
                 plan.Compartments.Where(c => c.IsApprovedForPlacement).Select(c => c.CompartmentId));
-            foreach (var device in plan.Devices.Where(d =>
-                         d.Role == DeviceRole.SmokeDetector && approvedIds.Contains(d.CompartmentId)))
+            foreach (var device in plan.Devices.Where(d => !d.IsExcluded && approvedIds.Contains(d.CompartmentId)))
             {
-                int markerColor = ColorKey(20, 190, 220);
-                var location = device.Location;
-                AddLine(lines,
-                    new Point2D(location.X - MarkerHalfSizeMm, location.Y),
-                    new Point2D(location.X + MarkerHalfSizeMm, location.Y),
-                    device.ElevationMm, markerColor);
-                AddLine(lines,
-                    new Point2D(location.X, location.Y - MarkerHalfSizeMm),
-                    new Point2D(location.X, location.Y + MarkerHalfSizeMm),
-                    device.ElevationMm, markerColor);
+                double angle = device.RotationDegrees * Math.PI / 180.0;
+                var axisU = new Point2D(Math.Cos(angle), Math.Sin(angle));
+                var axisV = new Point2D(-axisU.Y, axisU.X);
+                Point2D Local(double u, double v) => new Point2D(
+                    device.Location.X + u * axisU.X + v * axisV.X,
+                    device.Location.Y + u * axisU.Y + v * axisV.Y);
 
-                Point2D previous = new Point2D(
-                    location.X + maxWallDistanceMm,
-                    location.Y);
-                for (int segment = 1; segment <= CoverageCircleSegments; segment++)
+                void AddSquare(double halfSize, int color)
                 {
-                    double angle = 2.0 * Math.PI * segment / CoverageCircleSegments;
-                    var next = new Point2D(
-                        location.X + maxWallDistanceMm * Math.Cos(angle),
-                        location.Y + maxWallDistanceMm * Math.Sin(angle));
-                    AddLine(lines, previous, next, device.ElevationMm, ColorKey(40, 145, 210));
-                    previous = next;
+                    var corners = new[]
+                    {
+                        Local(-halfSize, -halfSize), Local(halfSize, -halfSize),
+                        Local(halfSize, halfSize), Local(-halfSize, halfSize)
+                    };
+                    AddRing(lines, corners, device.ElevationMm, color);
                 }
-            }
 
+                if (device.Role == DeviceRole.EwisSpeaker)
+                {
+                    AddSquare(MarkerHalfSizeMm, ColorKey(124, 58, 237));
+                    continue;
+                }
+
+                int markerColor = device.Role == DeviceRole.HeatDetector ? ColorKey(234, 88, 12) : ColorKey(20, 190, 220);
+                AddLine(lines, Local(-MarkerHalfSizeMm, 0), Local(MarkerHalfSizeMm, 0), device.ElevationMm, markerColor);
+                AddLine(lines, Local(0, -MarkerHalfSizeMm), Local(0, MarkerHalfSizeMm), device.ElevationMm, markerColor);
+                AddSquare(wallReachMm(device.Role), ColorKey(40, 145, 210));
+            }
             return lines.ToArray();
         }
 

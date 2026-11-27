@@ -1,6 +1,4 @@
-using System;
 using System.Windows.Controls;
-using System.Windows.Threading;
 using Autodesk.Revit.UI;
 using FireDetectionLayout.Revit.ViewModels;
 
@@ -24,13 +22,6 @@ namespace FireDetectionLayout.Revit.UI
             {
                 DockPosition = DockPosition.Right
             };
-        }
-
-        private void CompartmentGrid_CellEditEnding(object sender, DataGridCellEditEndingEventArgs e)
-        {
-            Dispatcher.BeginInvoke(
-                new Action(ViewModel.QueuePreviewRefresh),
-                DispatcherPriority.Background);
         }
     }
 }

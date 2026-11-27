@@ -12,6 +12,10 @@ namespace FireDetectionLayout.Core.Geometry
     {
         public List<Polygon2D> Compartments { get; } = new List<Polygon2D>();
         public List<Segment2D> DanglingEdges { get; } = new List<Segment2D>();
+
+        /// <summary>Walls and downstands that reach the smoke-layer band and therefore bound smoke flow.</summary>
+        public List<WallBarrier> ActiveWalls { get; } = new List<WallBarrier>();
+
         public int FilteredOutLowWalls { get; set; }
     }
 
@@ -27,7 +31,8 @@ namespace FireDetectionLayout.Core.Geometry
             IReadOnlyList<WallBarrier> walls,
             double levelElevationMm,
             double referenceCeilingElevationMm,
-            As1670_1Rules rules)
+            As1670_1Rules rules,
+            IReadOnlyList<CeilingSurface>? ceilings = null)
         {
             var result = new WallPolygonizationResult();
             if (walls.Count == 0)
@@ -38,6 +43,7 @@ namespace FireDetectionLayout.Core.Geometry
             double smokeBandBottomZ = referenceCeilingElevationMm - smokeBandDepth;
 
             var activeSegments = new List<Segment2D>();
+            CeilingCoverIndex? exposedDownstandIndex = null;
             foreach (var wall in walls)
             {
                 if (wall.Centerline.Length < 10.0)
@@ -46,13 +52,46 @@ namespace FireDetectionLayout.Core.Geometry
                 // Wall or downstand must extend into the upper smoke-layer band to bound smoke flow.
                 bool reachesSmokeBand = wall.TopElevationMm >= smokeBandBottomZ &&
                                         wall.BaseElevationMm <= referenceCeilingElevationMm + 200.0;
-                if (!reachesSmokeBand)
+                if (reachesSmokeBand)
                 {
-                    result.FilteredOutLowWalls++;
+                    activeSegments.Add(wall.Centerline);
+                    result.ActiveWalls.Add(wall);
                     continue;
                 }
 
-                activeSegments.Add(wall.Centerline);
+                // A deep downstand above ceiling level (beam wrap, bulkhead) is hidden by a ceiling
+                // but divides the smoke layer wherever the soffit is exposed.
+                bool addedExposed = false;
+                if (wall.BaseElevationMm > referenceCeilingElevationMm + 200.0)
+                {
+                    double soffitHeight = Math.Max(1000.0, wall.TopElevationMm - levelElevationMm);
+                    double barrierDepth = Math.Max(rules.MinBulkheadBarrierDepthMm, soffitHeight * rules.BulkheadBarrierHeightRatio);
+                    if (wall.TopElevationMm - wall.BaseElevationMm >= barrierDepth)
+                    {
+                        exposedDownstandIndex ??= new CeilingCoverIndex(ceilings);
+                        foreach (var exposed in exposedDownstandIndex.ExposedParts(wall))
+                        {
+                            activeSegments.Add(exposed);
+                            result.ActiveWalls.Add(new WallBarrier
+                            {
+                                ElementId = wall.ElementId,
+                                SourceModel = wall.SourceModel,
+                                TypeName = wall.TypeName,
+                                Centerline = exposed,
+                                ThicknessMm = wall.ThicknessMm,
+                                BaseElevationMm = wall.BaseElevationMm,
+                                TopElevationMm = wall.TopElevationMm,
+                                IsStructuralBeamOrBulkhead = true,
+                                IsCurtainWall = wall.IsCurtainWall,
+                                IsRoomBounding = wall.IsRoomBounding
+                            });
+                            addedExposed = true;
+                        }
+                    }
+                }
+
+                if (!addedExposed)
+                    result.FilteredOutLowWalls++;
             }
 
             if (activeSegments.Count < 3)
@@ -101,6 +140,73 @@ namespace FireDetectionLayout.Core.Geometry
             }
 
             return result;
+        }
+
+        /// <summary>Finds the parts of a downstand that no ceiling passes beneath.</summary>
+        private sealed class CeilingCoverIndex
+        {
+            private readonly List<(Polygon Footprint, double UndersideMm)> _ceilings =
+                new List<(Polygon Footprint, double UndersideMm)>();
+
+            public CeilingCoverIndex(IReadOnlyList<CeilingSurface>? ceilings)
+            {
+                if (ceilings == null)
+                    return;
+
+                foreach (var ceiling in ceilings)
+                {
+                    var footprint = TryToValidNtsPolygon(ceiling.Footprint);
+                    if (footprint != null)
+                        _ceilings.Add((footprint, ceiling.UndersideElevationMm));
+                }
+            }
+
+            private static NetTopologySuite.Geometries.Geometry? TryDifference(
+                NetTopologySuite.Geometries.Geometry line, Polygon footprint)
+            {
+                try
+                {
+                    return NetTopologySuite.Operation.OverlayNG.OverlayNGRobust.Overlay(
+                        line, footprint, NetTopologySuite.Operation.Overlay.SpatialFunction.Difference);
+                }
+                catch (TopologyException)
+                {
+                    return null;
+                }
+            }
+
+            public IEnumerable<Segment2D> ExposedParts(WallBarrier wall)
+            {
+                NetTopologySuite.Geometries.Geometry line = Factory.CreateLineString(new[]
+                {
+                    new Coordinate(wall.Centerline.Start.X, wall.Centerline.Start.Y),
+                    new Coordinate(wall.Centerline.End.X, wall.Centerline.End.Y)
+                });
+
+                foreach (var (footprint, undersideMm) in _ceilings)
+                {
+                    if (undersideMm > wall.BaseElevationMm + 50.0 ||
+                        !footprint.EnvelopeInternal.Intersects(line.EnvelopeInternal))
+                        continue;
+
+                    // When the overlay fails, what is exposed is unknown: treat the downstand as hidden.
+                    var remaining = TryDifference(line, footprint);
+                    if (remaining == null || remaining.IsEmpty)
+                        yield break;
+
+                    line = remaining;
+                }
+
+                for (int i = 0; i < line.NumGeometries; i++)
+                {
+                    if (line.GetGeometryN(i) is LineString part && part.Length >= 300.0)
+                    {
+                        yield return new Segment2D(
+                            new Point2D(part.StartPoint.X, part.StartPoint.Y),
+                            new Point2D(part.EndPoint.X, part.EndPoint.Y));
+                    }
+                }
+            }
         }
 
         private static List<Segment2D> SnapEndpoints(List<Segment2D> segments, double toleranceMm)

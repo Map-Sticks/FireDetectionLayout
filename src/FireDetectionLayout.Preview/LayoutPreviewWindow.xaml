@@ -1,0 +1,190 @@
+<Window x:Class="FireDetectionLayout.Preview.LayoutPreviewWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:FireDetectionLayout.Preview"
+        Title="Fire Detection Layout - Preview"
+        Width="1280" Height="820" MinWidth="820" MinHeight="520"
+        Background="#F3F4F6"
+        ShowInTaskbar="True">
+    <Window.Resources>
+        <Style TargetType="Button">
+            <Setter Property="Padding" Value="10,4"/>
+            <Setter Property="Margin" Value="0,0,6,0"/>
+        </Style>
+        <Style TargetType="CheckBox">
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Margin" Value="0,0,12,0"/>
+        </Style>
+        <Style x:Key="Legend" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Foreground" Value="#4B5563"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+        </Style>
+    </Window.Resources>
+
+    <DockPanel Margin="8">
+        <!-- Actions on the layout -->
+        <Border DockPanel.Dock="Top" Background="White" BorderBrush="#D1D5DB" BorderThickness="1" Padding="8,6" Margin="0,0,0,6">
+            <DockPanel>
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                    <Button Content="Import plan..." Command="{Binding ImportCommand}"
+                            ToolTip="Load device positions from an externally assessed plan JSON and re-check them."/>
+                    <Button Content="Export package..." Command="{Binding ExportCommand}"
+                            ToolTip="Save the snapshot, rule profile, plan and drawing for external assessment."/>
+                    <Button Content="{Binding CommitLabel}" Command="{Binding CommitCommand}" FontWeight="SemiBold"
+                            Margin="6,0,0,0" Padding="14,4"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="Level:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                    <ComboBox ItemsSource="{Binding Levels}" SelectedItem="{Binding SelectedLevel, Mode=TwoWay}"
+                              DisplayMemberPath="LevelName" MinWidth="130" Margin="0,0,12,0"/>
+                    <Button Content="Regenerate space" Command="{Binding RegenerateSelectedCommand}"
+                            ToolTip="Show the next layout alternative for the selected space."/>
+                    <Button Content="Regenerate all" Command="{Binding RegenerateAllCommand}"
+                            ToolTip="Step every space on this level to its next layout alternative."/>
+                    <Button Content="Reset space" Command="{Binding ResetSelectedCommand}"
+                            ToolTip="Return the selected space to its preferred layout and discard manual edits."/>
+                    <Button Content="Pick tile grid origin" Command="{Binding PickGridOriginCommand}"
+                            ToolTip="Click a ceiling grid intersection in Revit when the grid origin could not be read from the model."/>
+                    <Button Content="Zoom fit" Command="{Binding ZoomToFitCommand}"/>
+                </StackPanel>
+            </DockPanel>
+        </Border>
+
+        <!-- Totals -->
+        <Border DockPanel.Dock="Bottom" Background="White" BorderBrush="#D1D5DB" BorderThickness="1" Padding="8,5" Margin="0,6,0,0">
+            <TextBlock Text="{Binding SummaryLine}" Foreground="#374151" TextTrimming="CharacterEllipsis"/>
+        </Border>
+
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" MinWidth="300"/>
+                <ColumnDefinition Width="6"/>
+                <ColumnDefinition Width="510" MinWidth="280"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Drawing -->
+            <Border Grid.Column="0" BorderBrush="#D1D5DB" BorderThickness="1" Background="White">
+                <DockPanel>
+                    <Border DockPanel.Dock="Top" Background="#F9FAFB" BorderBrush="#E5E7EB" BorderThickness="0,0,0,1" Padding="8,5">
+                        <StackPanel Orientation="Horizontal">
+                            <CheckBox Content="Wall reach" IsChecked="{Binding ShowCoverage, Mode=TwoWay}"
+                                      ToolTip="Outline the maximum wall distance around the devices of the selected space."/>
+                            <CheckBox Content="Tile grid" IsChecked="{Binding ShowTileGrid, Mode=TwoWay}"/>
+                            <CheckBox Content="Lights / diffusers" IsChecked="{Binding ShowFixtures, Mode=TwoWay}"
+                                      ToolTip="Show light fittings, air terminals, sprinklers and existing fire devices."/>
+                            <CheckBox Content="Revit view" IsChecked="{Binding ShowUnderlay, Mode=TwoWay}"
+                                      ToolTip="Show the capture of the Revit view under the layout."/>
+                            <CheckBox Content="Snap" IsChecked="{Binding SnapToGrid, Mode=TwoWay}"
+                                      ToolTip="Lock moved and added devices to tile centres, or to 50 mm steps on flush ceilings."/>
+                        </StackPanel>
+                    </Border>
+                    <local:LayoutCanvas x:Name="LayoutDrawing" Workspace="{Binding}"/>
+                </DockPanel>
+            </Border>
+
+            <GridSplitter Grid.Column="1" HorizontalAlignment="Stretch" Background="Transparent"/>
+
+            <!-- Spaces -->
+            <Grid Grid.Column="2">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <DataGrid Grid.Row="0"
+                          ItemsSource="{Binding SelectedLevel.Rows}"
+                          SelectedItem="{Binding SelectedCompartment, Mode=TwoWay}"
+                          AutoGenerateColumns="False" CanUserAddRows="False" CanUserDeleteRows="False"
+                          HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                          HorizontalGridLinesBrush="#E5E7EB" SelectionMode="Single"
+                          MouseDoubleClick="SpaceGrid_MouseDoubleClick">
+                    <DataGrid.Columns>
+                        <DataGridTemplateColumn Header="Place" Width="42">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <CheckBox IsChecked="{Binding IsApproved, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                              HorizontalAlignment="Center" Margin="0"
+                                              ToolTip="Place this space's devices when committing."/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTemplateColumn Header="" Width="16">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <Ellipse Width="10" Height="10" Fill="{Binding StatusBrush}" ToolTip="{Binding Status}"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTextColumn Header="Space" Binding="{Binding DisplayName, Mode=OneWay}" IsReadOnly="True" Width="*"/>
+                        <DataGridTextColumn Header="Ceiling" Binding="{Binding Ceiling, Mode=OneWay}" IsReadOnly="True" Width="88"/>
+                        <DataGridTemplateColumn Header="Det" Width="48">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                        <CheckBox IsChecked="{Binding IncludeDetectors, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                  Margin="0,0,3,0" ToolTip="Lay out detectors in this space."/>
+                                        <TextBlock Text="{Binding Detectors}"/>
+                                    </StackPanel>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTemplateColumn Header="Spk" Width="48">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                        <CheckBox IsChecked="{Binding IncludeSpeakers, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                  Margin="0,0,3,0" ToolTip="Lay out speakers in this space."/>
+                                        <TextBlock Text="{Binding Speakers}"/>
+                                    </StackPanel>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTemplateColumn Header="Heat" Width="40">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <CheckBox IsChecked="{Binding IsHeat, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                              HorizontalAlignment="Center" Margin="0"
+                                              ToolTip="Use heat detectors (and heat spacing) in this space instead of smoke detectors."/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTextColumn Header="Alt" Binding="{Binding Variant, Mode=OneWay}" IsReadOnly="True" Width="36"/>
+                        <DataGridTemplateColumn Header="" Width="30">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <Button Content="&#x21BB;" Command="{Binding RegenerateCommand}" Padding="3,0" Margin="0"
+                                            ToolTip="Regenerate: show the next layout alternative for this space."/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                    </DataGrid.Columns>
+                </DataGrid>
+
+                <TextBox Grid.Row="1" Text="{Binding SelectedCompartmentDetails, Mode=OneWay}" IsReadOnly="True"
+                         TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Height="120"
+                         Margin="0,6,0,0" Padding="5" Background="White"/>
+
+                <Border Grid.Row="2" Background="White" BorderBrush="#D1D5DB" BorderThickness="1" Padding="8,6" Margin="0,6,0,0">
+                    <StackPanel>
+                        <TextBlock Style="{StaticResource Legend}"
+                                   Text="Click a device to cancel or restore it. Drag a device to move it. Right-click to add a device. Untick Det / Spk to leave a device kind out of a space."/>
+                        <TextBlock Style="{StaticResource Legend}" Margin="0,4,0,0"
+                                   Text="Wheel zooms, drag empty space to pan, double-click a space to zoom to it."/>
+                        <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                            <Ellipse Width="11" Height="11" Stroke="#0E7490" StrokeThickness="2" Margin="0,0,4,0"/>
+                            <TextBlock Style="{StaticResource Legend}" Text="Smoke" Margin="0,0,12,0"/>
+                            <Ellipse Width="11" Height="11" Stroke="#EA580C" StrokeThickness="2" Margin="0,0,4,0"/>
+                            <TextBlock Style="{StaticResource Legend}" Text="Heat" Margin="0,0,12,0"/>
+                            <Rectangle Width="11" Height="11" Stroke="#7C3AED" StrokeThickness="2" Margin="0,0,4,0"/>
+                            <TextBlock Style="{StaticResource Legend}" Text="Speaker" Margin="0,0,12,0"/>
+                            <TextBlock Style="{StaticResource Legend}" Text="x" Foreground="#DC2626" FontWeight="Bold" Margin="0,0,4,0"/>
+                            <TextBlock Style="{StaticResource Legend}" Text="Cancelled"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+            </Grid>
+        </Grid>
+    </DockPanel>
+</Window>

@@ -19,7 +19,32 @@ namespace FireDetectionLayout.Core.Geometry
         public double CoverageRatio { get; set; }
         public double TileShareRatio { get; set; }
         public double PlasterboardShareRatio { get; set; }
+
+        /// <summary>True when the ceiling could not be analysed because of invalid or unrecoverable geometry.</summary>
+        public bool HasGeometryError { get; set; }
+
+        /// <summary>Every ceiling that overlaps the compartment, largest overlap first.</summary>
+        public List<CeilingOverlap> OverlappingCeilings { get; } = new List<CeilingOverlap>();
+
         public List<string> Notes { get; } = new List<string>();
+    }
+
+    public sealed class CeilingOverlap
+    {
+        public CeilingOverlap(CeilingSurface ceiling, CeilingKind kind, double overlapAreaSqMm)
+        {
+            Ceiling = ceiling;
+            Kind = kind;
+            OverlapAreaSqMm = overlapAreaSqMm;
+        }
+
+        public CeilingSurface Ceiling { get; }
+        public CeilingKind Kind { get; }
+        public double OverlapAreaSqMm { get; }
+
+        public bool HasTileGrid =>
+            Kind == CeilingKind.SuspendedTile &&
+            Ceiling.TileGrid != null && Ceiling.TileGrid.PitchUMm > 0 && Ceiling.TileGrid.PitchVMm > 0;
     }
 
     /// <summary>
@@ -77,6 +102,7 @@ namespace FireDetectionLayout.Core.Geometry
 
             double tileArea = 0, plasterArea = 0, slopedArea = 0, unknownArea = 0;
             double bestTileArea = 0, bestAnyArea = 0;
+            string? unrecognisedType = null;
 
             foreach (var ceiling in ceilings)
             {
@@ -97,6 +123,7 @@ namespace FireDetectionLayout.Core.Geometry
                 catch (TopologyException error)
                 {
                     analysis.Kind = CeilingKind.Unknown;
+                    analysis.HasGeometryError = true;
                     analysis.Notes.Add(
                         $"Overlap failed for {ceilingLabel}: {error.Message}. Automatic placement withheld.");
                     return analysis;
@@ -106,6 +133,10 @@ namespace FireDetectionLayout.Core.Geometry
                     continue;
 
                 var kind = ClassifySurface(ceiling, rules);
+                analysis.OverlappingCeilings.Add(new CeilingOverlap(ceiling, kind, overlap));
+                if (kind == CeilingKind.Unknown && unrecognisedType == null)
+                    unrecognisedType = ceiling.TypeName;
+
                 switch (kind)
                 {
                     case CeilingKind.SuspendedTile:
@@ -135,10 +166,14 @@ namespace FireDetectionLayout.Core.Geometry
                 }
             }
 
-            double totalCovered = tileArea + plasterArea + slopedArea + unknownArea;
+            analysis.OverlappingCeilings.Sort((a, b) => b.OverlapAreaSqMm.CompareTo(a.OverlapAreaSqMm));
+
+            // Ceilings whose type is not recognised are laid out as flush (plasterboard-like) ceilings.
+            double flushArea = plasterArea + unknownArea;
+            double totalCovered = tileArea + flushArea + slopedArea;
             analysis.CoverageRatio = Math.Min(1.0, totalCovered / compArea);
             analysis.TileShareRatio = tileArea / compArea;
-            analysis.PlasterboardShareRatio = plasterArea / compArea;
+            analysis.PlasterboardShareRatio = flushArea / compArea;
 
             if (analysis.CoverageRatio < 0.25)
             {
@@ -158,18 +193,20 @@ namespace FireDetectionLayout.Core.Geometry
                 analysis.Kind = CeilingKind.MixedFinish;
                 analysis.Notes.Add("Mixed finish (tiled field + plasterboard margin): assess full wall compartment, prefer tiles.");
             }
-            else if (tileArea >= plasterArea && tileArea > 0)
+            else if (tileArea >= flushArea && tileArea > 0)
             {
                 analysis.Kind = CeilingKind.SuspendedTile;
             }
-            else if (plasterArea > 0)
+            else
             {
                 analysis.Kind = CeilingKind.Plasterboard;
             }
-            else
+
+            if (unrecognisedType != null &&
+                analysis.Kind != CeilingKind.ExposedOrNone && analysis.Kind != CeilingKind.Sloped)
             {
-                analysis.Kind = CeilingKind.Unknown;
-                analysis.Notes.Add("Ceiling type not recognized as tile or plasterboard; confirm classification.");
+                analysis.Notes.Add(
+                    $"Ceiling type '{unrecognisedType}' is not recognised as tile or plasterboard; laid out as a flush ceiling.");
             }
 
             return analysis;
@@ -257,6 +294,7 @@ namespace FireDetectionLayout.Core.Geometry
             if (footprint.OuterRing.Count < 3 || footprint.Holes.Any(hole => hole.Count < 3))
             {
                 analysis.Kind = CeilingKind.Unknown;
+                analysis.HasGeometryError = true;
                 analysis.Notes.Add(
                     $"Invalid {label}: a boundary ring has fewer than three points. Automatic placement withheld.");
                 return null;
@@ -270,6 +308,7 @@ namespace FireDetectionLayout.Core.Geometry
             catch (ArgumentException error)
             {
                 analysis.Kind = CeilingKind.Unknown;
+                analysis.HasGeometryError = true;
                 analysis.Notes.Add($"Invalid {label}: {error.Message}. Automatic placement withheld.");
                 return null;
             }
@@ -278,6 +317,7 @@ namespace FireDetectionLayout.Core.Geometry
             if (validationError != null)
             {
                 analysis.Kind = CeilingKind.Unknown;
+                analysis.HasGeometryError = true;
                 analysis.Notes.Add($"Invalid {label}: {validationError}. Automatic placement withheld.");
                 return null;
             }

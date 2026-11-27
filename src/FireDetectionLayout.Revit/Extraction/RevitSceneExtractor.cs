@@ -22,7 +22,21 @@ namespace FireDetectionLayout.Revit.Extraction
             if (activeView.GenLevel == null)
                 throw new InvalidOperationException("Open a Floor Plan or Reflected Ceiling Plan associated with a Level.");
 
-            Level level = activeView.GenLevel;
+            return ExtractLevel(hostDoc, activeView.GenLevel, activeView.Name);
+        }
+
+        /// <summary>
+        /// Extracts one level. <paramref name="scopeRoomIds"/> limits the later analysis to the
+        /// spaces containing those host Rooms / MEP Spaces; <paramref name="gridOrigins"/> supplies
+        /// tile grid origins the user has picked for ceilings whose origin Revit cannot report.
+        /// </summary>
+        public SceneSnapshot ExtractLevel(
+            Document hostDoc,
+            Level level,
+            string viewName,
+            IEnumerable<string>? scopeRoomIds = null,
+            IReadOnlyDictionary<string, Point2D>? gridOrigins = null)
+        {
             double levelElevMm = level.Elevation * FtToMm;
             double? nextLevelElevMm = FindNextLevelElevationMm(hostDoc, levelElevMm);
             double ceilingBandAboveMm = nextLevelElevMm.HasValue
@@ -38,8 +52,9 @@ namespace FireDetectionLayout.Revit.Extraction
                 {
                     DocumentTitle = hostDoc.Title,
                     RevitVersion = hostDoc.Application.VersionNumber,
-                    ActiveViewName = activeView.Name,
+                    ActiveViewName = viewName,
                     LevelName = level.Name,
+                    LevelElementId = RevitIds.GetKey(level.Id),
                     LevelElevationMm = Math.Round(levelElevMm, 1),
                     ExtractedUtc = DateTime.UtcNow
                 }
@@ -74,7 +89,52 @@ namespace FireDetectionLayout.Revit.Extraction
                 ExtractFromDocument(linkDoc, link.GetTotalTransform(), linkName, levelElevMm, ceilingBandAboveMm, soffitBandAboveMm, snapshot);
             }
 
+            if (scopeRoomIds != null)
+                snapshot.ScopeRoomElementIds.AddRange(scopeRoomIds);
+            if (gridOrigins != null)
+                ApplyGridOrigins(snapshot, gridOrigins);
+
             return snapshot;
+        }
+
+        /// <summary>Key under which a picked tile grid origin is remembered for a ceiling.</summary>
+        public static string GridOriginKey(CeilingSurface ceiling) => $"{ceiling.SourceModel}|{ceiling.ElementId}";
+
+        private static void ApplyGridOrigins(SceneSnapshot snapshot, IReadOnlyDictionary<string, Point2D> gridOrigins)
+        {
+            foreach (var ceiling in snapshot.Ceilings)
+            {
+                if (ceiling.TileGrid == null || ceiling.TileGrid.IsOriginVerified)
+                    continue;
+                if (!gridOrigins.TryGetValue(GridOriginKey(ceiling), out var origin))
+                    continue;
+
+                ceiling.TileGrid.OriginMm = new Point2D(origin.X, origin.Y);
+                ceiling.TileGrid.IsOriginVerified = true;
+                ceiling.TileGrid.Source = "UserPicked";
+            }
+        }
+
+        /// <summary>
+        /// Limits a collector to elements whose bounding box crosses a host elevation band, which
+        /// keeps multi-level extraction fast on large models.
+        /// </summary>
+        private static FilteredElementCollector InElevationBand(
+            FilteredElementCollector collector,
+            Transform tf,
+            double minElevMm,
+            double maxElevMm)
+        {
+            // A link that is only moved or rotated in plan keeps Z vertical, so the band maps directly.
+            if (Math.Abs(tf.BasisZ.Z - 1.0) > 1e-6)
+                return collector;
+
+            const double farFt = 1.0e7;
+            double offsetFt = tf.Origin.Z;
+            var outline = new Outline(
+                new XYZ(-farFt, -farFt, minElevMm / FtToMm - offsetFt),
+                new XYZ(farFt, farFt, maxElevMm / FtToMm - offsetFt));
+            return collector.WherePasses(new BoundingBoxIntersectsFilter(outline));
         }
 
         private static double? FindNextLevelElevationMm(Document hostDoc, double activeLevelElevMm)
@@ -102,9 +162,9 @@ namespace FireDetectionLayout.Revit.Extraction
             double levelBandAboveMm = ceilingBandAboveMm;
 
             // 1. Physical walls in the active level vertical band.
-            var walls = new FilteredElementCollector(doc)
-                .OfClass(typeof(Wall))
-                .WhereElementIsNotElementType()
+            var walls = InElevationBand(
+                    new FilteredElementCollector(doc).OfClass(typeof(Wall)).WhereElementIsNotElementType(),
+                    tf, targetLevelElevMm + 500.0, targetLevelElevMm + levelBandAboveMm)
                 .Cast<Wall>();
 
             foreach (var wall in walls)
@@ -145,9 +205,9 @@ namespace FireDetectionLayout.Revit.Extraction
             }
 
             // 2. Ceilings in the active level vertical band.
-            var ceilings = new FilteredElementCollector(doc)
-                .OfClass(typeof(Ceiling))
-                .WhereElementIsNotElementType()
+            var ceilings = InElevationBand(
+                    new FilteredElementCollector(doc).OfClass(typeof(Ceiling)).WhereElementIsNotElementType(),
+                    tf, targetLevelElevMm + 1500.0, targetLevelElevMm + levelBandAboveMm)
                 .Cast<Ceiling>();
 
             foreach (var ceiling in ceilings)
@@ -242,9 +302,9 @@ namespace FireDetectionLayout.Revit.Extraction
             double levelBandAboveMm,
             SceneSnapshot snapshot)
         {
-            var elements = new FilteredElementCollector(doc)
-                .OfCategory(category)
-                .WhereElementIsNotElementType();
+            var elements = InElevationBand(
+                new FilteredElementCollector(doc).OfCategory(category).WhereElementIsNotElementType(),
+                tf, targetLevelElevMm + 1500.0, targetLevelElevMm + levelBandAboveMm);
 
             foreach (var elem in elements)
             {
@@ -288,9 +348,9 @@ namespace FireDetectionLayout.Revit.Extraction
             SceneSnapshot snapshot)
             where TElement : Element
         {
-            var elements = new FilteredElementCollector(doc)
-                .OfClass(typeof(TElement))
-                .WhereElementIsNotElementType()
+            var elements = InElevationBand(
+                    new FilteredElementCollector(doc).OfClass(typeof(TElement)).WhereElementIsNotElementType(),
+                    tf, targetLevelElevMm + 1500.0, targetLevelElevMm + soffitBandAboveMm)
                 .Cast<TElement>();
 
             foreach (var elem in elements)

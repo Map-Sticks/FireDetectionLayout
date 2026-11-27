@@ -3,103 +3,185 @@
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       Title="Fire Detection Layout"
       Background="#FAFAFA">
-    <Grid Margin="10">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-        </Grid.RowDefinitions>
+    <Page.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVisibility"/>
+        <Style TargetType="GroupBox">
+            <Setter Property="Margin" Value="0,0,0,8"/>
+            <Setter Property="Padding" Value="6"/>
+        </Style>
+        <Style TargetType="Button">
+            <Setter Property="Padding" Value="9,4"/>
+            <Setter Property="Margin" Value="0,0,6,6"/>
+        </Style>
+        <Style x:Key="Hint" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Foreground" Value="#6B7280"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+        </Style>
+        <Style x:Key="ColumnHeader" TargetType="TextBlock" BasedOn="{StaticResource Hint}">
+            <Setter Property="HorizontalAlignment" Value="Center"/>
+            <Setter Property="TextAlignment" Value="Center"/>
+        </Style>
+    </Page.Resources>
 
-        <StackPanel Grid.Row="0" Margin="0,0,0,8">
-            <TextBlock Text="Fire Detection Layout (AS 1670.1 / AS 1670.4)"
-                       FontSize="14" FontWeight="SemiBold" Foreground="#1F2937"/>
-            <TextBlock Text="{Binding StatusMessage}"
-                       FontSize="11" Foreground="#4B5563" TextWrapping="Wrap" Margin="0,2,0,0"/>
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Margin="10">
+            <TextBlock Text="Fire Detection &amp; Speaker Layout" FontSize="14" FontWeight="SemiBold" Foreground="#1F2937"/>
+            <TextBlock Text="{Binding StatusMessage}" Style="{StaticResource Hint}" Foreground="#374151" Margin="0,2,0,8"/>
+
+            <GroupBox Header="Scope">
+                <StackPanel>
+                    <RadioButton GroupName="FireLayoutScope" Content="Level of the active view"
+                                 IsChecked="{Binding ScopeActiveLevel, Mode=TwoWay}" Margin="0,0,0,3"/>
+                    <RadioButton GroupName="FireLayoutScope" Content="Selected levels"
+                                 IsChecked="{Binding ScopeSelectedLevels, Mode=TwoWay}" Margin="0,0,0,3"/>
+                    <Border BorderBrush="#D1D5DB" BorderThickness="1" Margin="18,0,0,4" MaxHeight="130"
+                            Visibility="{Binding ScopeSelectedLevels, Converter={StaticResource BoolToVisibility}}">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <ItemsControl ItemsSource="{Binding LevelOptions}" Margin="4">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <CheckBox Content="{Binding Name}" IsChecked="{Binding IsSelected, Mode=TwoWay}" Margin="0,1"/>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
+                    </Border>
+                    <RadioButton GroupName="FireLayoutScope" Content="Rooms / spaces selected in Revit"
+                                 IsChecked="{Binding ScopeSelectedRooms, Mode=TwoWay}"/>
+                </StackPanel>
+            </GroupBox>
+
+            <GroupBox Header="Devices">
+                <StackPanel>
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                        <CheckBox Content="Detectors" IsChecked="{Binding PlaceDetectors, Mode=TwoWay}" Margin="0,0,16,0"/>
+                        <CheckBox Content="Speakers" IsChecked="{Binding PlaceSpeakers, Mode=TwoWay}"/>
+                    </StackPanel>
+                    <CheckBox Content="Pair a speaker with every detector" IsChecked="{Binding PairSpeakers, Mode=TwoWay}"
+                              Margin="0,0,0,4"
+                              ToolTip="Ticked: one common grid, each speaker beside a detector (the tighter spacing governs). Unticked: speakers get their own grid."/>
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                        <TextBlock Text="Detector to speaker (mm):" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                        <TextBox Width="56" Text="{Binding PairOffsetMm}"
+                                 ToolTip="Centre-to-centre distance of a paired detector and speaker on a flush ceiling. On tile ceilings the pair follows the tile module."/>
+                    </StackPanel>
+                    <CheckBox Content="Coordinate with ceiling tile grids" IsChecked="{Binding CoordinateWithCeilingGrid, Mode=TwoWay}"
+                              ToolTip="Ticked: devices sit on tile centres. Unticked: layout only - a symmetric room grid that ignores the tile set-out."/>
+                </StackPanel>
+            </GroupBox>
+
+            <GroupBox Header="Spacing rules and families (mm)">
+                <StackPanel>
+                    <Grid Margin="0,0,0,2">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="62"/>
+                            <ColumnDefinition Width="62"/>
+                            <ColumnDefinition Width="62"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="1" Text="Max spacing" Style="{StaticResource ColumnHeader}"/>
+                        <TextBlock Grid.Column="2" Text="Max to wall X/Y" Style="{StaticResource ColumnHeader}"/>
+                        <TextBlock Grid.Column="3" Text="Min to wall" Style="{StaticResource ColumnHeader}"/>
+                    </Grid>
+                    <ItemsControl ItemsSource="{Binding DeviceKinds}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Margin="0,0,0,6">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="62"/>
+                                        <ColumnDefinition Width="62"/>
+                                        <ColumnDefinition Width="62"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+                                    <TextBlock Grid.Column="0" Text="{Binding Label}" VerticalAlignment="Center" FontWeight="SemiBold"/>
+                                    <TextBox Grid.Column="1" Text="{Binding MaxSpacingMm}" Margin="2,0"
+                                             ToolTip="Maximum spacing between two of these devices."/>
+                                    <TextBox Grid.Column="2" Text="{Binding MaxWallDistanceMm}" Margin="2,0"
+                                             ToolTip="Maximum distance from a device to a wall, measured along the room X and Y axes."/>
+                                    <TextBox Grid.Column="3" Text="{Binding MinWallClearanceMm}" Margin="2,0"
+                                             ToolTip="Minimum distance from a device to a wall."/>
+                                    <ComboBox Grid.Row="1" Grid.ColumnSpan="4" Margin="0,3,0,0"
+                                              ItemsSource="{Binding Families}"
+                                              SelectedItem="{Binding Family, Mode=TwoWay}"
+                                              DisplayMemberPath="DisplayName"
+                                              ToolTip="Family type placed for this device kind."/>
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <Button Content="Refresh families" Command="{Binding RefreshFamiliesCommand}" HorizontalAlignment="Left" Margin="0"
+                            ToolTip="Reload the Fire Alarm Device and Communication Device types loaded in this project."/>
+                </StackPanel>
+            </GroupBox>
+
+            <WrapPanel>
+                <Button Content="Analyze" Command="{Binding AnalyzeCommand}" FontWeight="SemiBold" Padding="14,4"
+                        ToolTip="Read the walls and ceilings of the chosen scope from Revit and lay out the devices."/>
+                <Button Content="Re-solve" Command="{Binding ReSolveCommand}"
+                        ToolTip="Lay out again with the current rules without re-reading Revit. Per-space choices are kept."/>
+                <Button Content="Open preview" Command="{Binding OpenPreviewCommand}"
+                        ToolTip="Review and adjust the layout in a separate window before placing anything."/>
+            </WrapPanel>
+            <WrapPanel>
+                <Button Content="Export package" Command="{Binding ExportPackageCommand}"
+                        ToolTip="Save the snapshot, view capture, rules and plan for assessment outside Revit."/>
+                <Button Content="Import plan" Command="{Binding ImportPlanCommand}"
+                        ToolTip="Load device positions from an externally assessed plan and re-check them."/>
+            </WrapPanel>
+
+            <CheckBox Content="Capture the view as a preview underlay" IsChecked="{Binding CaptureViewSnapshot, Mode=TwoWay}" Margin="0,0,0,3"/>
+            <CheckBox Content="Show the layout in the Revit view" IsChecked="{Binding IsPreviewEnabled, Mode=TwoWay}" Margin="0,0,0,3"/>
+            <CheckBox Content="Replace devices this tool placed earlier" IsChecked="{Binding ReplaceToolOwned, Mode=TwoWay}" Margin="0,0,0,8"
+                      ToolTip="On commit, remove this tool's earlier devices from the spaces being placed. Manually placed devices are never touched."/>
+
+            <ComboBox ItemsSource="{Binding Workspace.Levels}" SelectedItem="{Binding Workspace.SelectedLevel, Mode=TwoWay}"
+                      DisplayMemberPath="LevelName" Margin="0,0,0,4"
+                      Visibility="{Binding Workspace.HasResults, Converter={StaticResource BoolToVisibility}}"/>
+
+            <DataGrid ItemsSource="{Binding Workspace.SelectedLevel.Rows}"
+                      SelectedItem="{Binding Workspace.SelectedCompartment, Mode=TwoWay}"
+                      AutoGenerateColumns="False" CanUserAddRows="False" CanUserDeleteRows="False"
+                      HeadersVisibility="Column" GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="#E5E7EB"
+                      SelectionMode="Single" Height="230">
+                <DataGrid.Columns>
+                    <DataGridTemplateColumn Header="Place" Width="42">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <CheckBox IsChecked="{Binding IsApproved, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                          HorizontalAlignment="Center"/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTemplateColumn Header="" Width="16">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <Ellipse Width="10" Height="10" Fill="{Binding StatusBrush}" ToolTip="{Binding Status}"/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTextColumn Header="Space" Binding="{Binding DisplayName, Mode=OneWay}" IsReadOnly="True" Width="*"/>
+                    <DataGridTextColumn Header="Ceiling" Binding="{Binding Ceiling, Mode=OneWay}" IsReadOnly="True" Width="84"/>
+                    <DataGridTextColumn Header="Det" Binding="{Binding Detectors, Mode=OneWay}" IsReadOnly="True" Width="34"/>
+                    <DataGridTextColumn Header="Spk" Binding="{Binding Speakers, Mode=OneWay}" IsReadOnly="True" Width="34"/>
+                </DataGrid.Columns>
+            </DataGrid>
+
+            <TextBox Text="{Binding Workspace.SelectedCompartmentDetails, Mode=OneWay}" IsReadOnly="True"
+                     TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Height="84" Margin="0,6,0,0" Padding="4"/>
+
+            <Expander Header="Model warnings" Margin="0,6,0,0">
+                <TextBox Text="{Binding WarningsText, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap"
+                         VerticalScrollBarVisibility="Auto" MaxHeight="140" Padding="4"/>
+            </Expander>
+
+            <TextBlock Text="{Binding Workspace.SummaryLine}" Style="{StaticResource Hint}" Foreground="#374151" Margin="0,8,0,6"/>
+            <Button Content="Place approved devices" Command="{Binding CommitApprovedCommand}"
+                    FontWeight="SemiBold" Padding="12,6" HorizontalAlignment="Right" Margin="0"/>
         </StackPanel>
-
-        <WrapPanel Grid.Row="1" Margin="0,0,0,6">
-            <StackPanel Orientation="Horizontal" Margin="0,0,12,4">
-                <TextBlock Text="Max Spacing (mm):" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                <TextBox Width="68" Text="{Binding MaxSpacingMm, UpdateSourceTrigger=PropertyChanged}"/>
-            </StackPanel>
-            <StackPanel Orientation="Horizontal" Margin="0,0,12,4">
-                <TextBlock Text="Max Wall Reach (mm):" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                <TextBox Width="68" Text="{Binding MaxWallReachMm, UpdateSourceTrigger=PropertyChanged}"/>
-            </StackPanel>
-            <StackPanel Orientation="Horizontal" Margin="0,0,12,4">
-                <TextBlock Text="Min Wall Offset (mm):" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                <TextBox Width="60" Text="{Binding MinWallOffsetMm, UpdateSourceTrigger=PropertyChanged}"
-                         ToolTip="Minimum clearance from walls and bulkheads (mm)."/>
-            </StackPanel>
-        </WrapPanel>
-
-        <Grid Grid.Row="2" Margin="0,0,0,8">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="Auto"/>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="Auto"/>
-            </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0" Text="Detector Family:" VerticalAlignment="Center" Margin="0,0,6,0"/>
-            <ComboBox Grid.Column="1"
-                      ItemsSource="{Binding AvailableDetectorFamilies}"
-                      SelectedItem="{Binding SelectedDetectorFamily, Mode=TwoWay}"
-                      DisplayMemberPath="DisplayName"
-                      ToolTip="Select the approved Fire Alarm Device family and type to place."/>
-            <Button Grid.Column="2" Content="Refresh" Command="{Binding RefreshFamiliesCommand}"
-                    Padding="8,3" Margin="6,0,0,0"
-                    ToolTip="Reload loaded Fire Alarm Device families from the active Revit project."/>
-        </Grid>
-
-        <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,0,0,8">
-            <Button Content="Analyze Active Level" Command="{Binding AnalyzeActiveLevelCommand}"
-                    Padding="10,5" Margin="0,0,6,0" FontWeight="SemiBold"/>
-            <Button Content="Re-Solve" Command="{Binding ReSolveCommand}"
-                    Padding="10,5" Margin="0,0,6,0"/>
-            <Button Content="Export Snapshot JSON" Command="{Binding ExportSnapshotCommand}"
-                    Padding="10,5"/>
-            <CheckBox Content="Show live preview" IsChecked="{Binding IsPreviewEnabled, Mode=TwoWay}"
-                      VerticalAlignment="Center" Margin="10,0,0,0"/>
-        </StackPanel>
-
-        <DataGrid Grid.Row="4"
-                  ItemsSource="{Binding Compartments}"
-                  SelectedItem="{Binding SelectedCompartment, Mode=TwoWay}"
-                  CellEditEnding="CompartmentGrid_CellEditEnding"
-                  AutoGenerateColumns="False"
-                  CanUserAddRows="False"
-                  IsReadOnly="False"
-                  HeadersVisibility="Column"
-                  GridLinesVisibility="Horizontal">
-            <DataGrid.Columns>
-                <DataGridCheckBoxColumn Header="Place" Binding="{Binding IsApprovedForPlacement}" Width="48"/>
-                <DataGridTextColumn Header="Status" Binding="{Binding Status}" IsReadOnly="True" Width="62"/>
-                <DataGridTextColumn Header="Compartment / Room" Binding="{Binding DisplayName}" IsReadOnly="True" Width="*"/>
-                <DataGridTextColumn Header="Ceiling" Binding="{Binding CeilingKind}" IsReadOnly="True" Width="95"/>
-                <DataGridTextColumn Header="Elev (mm)" Binding="{Binding CeilingElevationMm}" IsReadOnly="True" Width="70"/>
-                <DataGridTextColumn Header="Detectors" Binding="{Binding ProposedDetectorCount}" IsReadOnly="True" Width="68"/>
-                <DataGridTextColumn Header="Wall Max (mm)" Binding="{Binding WorstCaseWallDistanceMm}" IsReadOnly="True" Width="92"/>
-            </DataGrid.Columns>
-        </DataGrid>
-
-        <TextBox Grid.Row="5" Text="{Binding SelectedCompartmentDetails}" IsReadOnly="True"
-                 TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" MaxHeight="70"
-                 Margin="0,6,0,0" Padding="4"/>
-
-        <Grid Grid.Row="6" Margin="0,8,0,0">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="Auto"/>
-            </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0" Text="{Binding SummaryLine}" VerticalAlignment="Center"
-                       FontSize="11" Foreground="#374151" TextWrapping="Wrap"/>
-            <Button Grid.Column="1" Content="Place Approved Devices"
-                    Command="{Binding CommitApprovedCommand}"
-                    IsEnabled="{Binding CanCommit}"
-                    Padding="12,6" FontWeight="SemiBold"/>
-        </Grid>
-    </Grid>
+    </ScrollViewer>
 </Page>

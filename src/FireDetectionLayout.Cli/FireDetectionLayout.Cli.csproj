@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>FireDetectionLayout.Cli</RootNamespace>
+    <AssemblyName>firelayout</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FireDetectionLayout.Core\FireDetectionLayout.Core.csproj" />
+  </ItemGroup>
+
+</Project>

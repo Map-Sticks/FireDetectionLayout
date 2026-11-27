@@ -15,6 +15,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\FireDetectionLayout.Core\FireDetectionLayout.Core.csproj" />
+    <ProjectReference Include="..\FireDetectionLayout.Preview\FireDetectionLayout.Preview.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -20,6 +20,28 @@ namespace FireDetectionLayout.Core.Models
         public List<DoorFeature> Doors { get; set; } = new List<DoorFeature>();
         public List<ExistingFireDevice> ExistingDevices { get; set; } = new List<ExistingFireDevice>();
         public List<string> Diagnostics { get; set; } = new List<string>();
+
+        /// <summary>
+        /// Host Room / MEP Space element ids that limit the analysis to selected spaces.
+        /// Empty means the whole level is analysed.
+        /// </summary>
+        public List<string> ScopeRoomElementIds { get; set; } = new List<string>();
+
+        /// <summary>Optional image of the Revit view the snapshot was taken from, with its model extents.</summary>
+        public ViewImageReference? ViewImage { get; set; }
+    }
+
+    /// <summary>
+    /// A raster capture of the analysed Revit view, located in model coordinates so it can be
+    /// drawn under the layout preview or handed to an external assessment.
+    /// </summary>
+    public sealed class ViewImageReference
+    {
+        public string FilePath { get; set; } = string.Empty;
+        public double MinXMm { get; set; }
+        public double MinYMm { get; set; }
+        public double MaxXMm { get; set; }
+        public double MaxYMm { get; set; }
     }
 
     public sealed class SnapshotMetadata
@@ -28,6 +50,7 @@ namespace FireDetectionLayout.Core.Models
         public string RevitVersion { get; set; } = string.Empty;
         public string ActiveViewName { get; set; } = string.Empty;
         public string LevelName { get; set; } = string.Empty;
+        public string LevelElementId { get; set; } = string.Empty;
         public double LevelElevationMm { get; set; }
         public double DefaultCeilingHeightMm { get; set; } = 2700.0;
         public string PhaseName { get; set; } = string.Empty;

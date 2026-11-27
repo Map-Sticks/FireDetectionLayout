@@ -3,134 +3,298 @@ using System.Collections.Generic;
 using System.Linq;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.DB.Structure;
+using FireDetectionLayout.Core.Geometry;
 using FireDetectionLayout.Core.Models;
+using FireDetectionLayout.Revit.Extraction;
+using NetTopologySuite.Geometries.Prepared;
 
 namespace FireDetectionLayout.Revit.Placement
 {
     public sealed class CommitResult
     {
-        public int PlacedCount { get; set; }
+        public int PlacedDetectors { get; set; }
+        public int PlacedSpeakers { get; set; }
+        public int RemovedCount { get; set; }
         public int SkippedCount { get; set; }
         public List<string> Warnings { get; } = new List<string>();
+
+        public int PlacedCount => PlacedDetectors + PlacedSpeakers;
+    }
+
+    /// <summary>Family type to place for each device kind. A kind without a type is not placed.</summary>
+    public sealed class DeviceFamilyMap
+    {
+        public FamilySymbol? SmokeDetector { get; set; }
+        public FamilySymbol? HeatDetector { get; set; }
+        public FamilySymbol? Speaker { get; set; }
+
+        public FamilySymbol? Get(DeviceRole role)
+        {
+            switch (role)
+            {
+                case DeviceRole.HeatDetector: return HeatDetector;
+                case DeviceRole.EwisSpeaker: return Speaker;
+                default: return SmokeDetector;
+            }
+        }
     }
 
     /// <summary>
-    /// Commits approved ProposedDevice items into Revit in a single atomic transaction.
-    /// Places devices hosted on the active view's Level with an elevation offset matching
-    /// the solved ceiling/soffit height, falling back to a horizontal reference plane only
-    /// if a family rejects level-plane hosting.
+    /// Commits reviewed plans into Revit in a single atomic transaction. Devices are placed on
+    /// their Level with an elevation offset matching the solved ceiling / soffit height; a family
+    /// that rejects level hosting falls back to a named horizontal reference plane.
     /// </summary>
     public sealed class RevitPlacementCommitter
     {
+        public const string OwnershipTag = "FIRE_LAYOUT_AUTO";
+
         private const double MmToFt = 1.0 / 304.8;
         private const double FtToMm = 304.8;
 
-        public CommitResult CommitPlan(
+        public CommitResult CommitPlans(
             Document doc,
             View activeView,
-            PlacementPlan plan,
-            FamilySymbol detectorSymbol)
+            IReadOnlyList<PlacementPlan> plans,
+            DeviceFamilyMap families,
+            bool replaceToolOwned)
         {
             var result = new CommitResult();
-            var approvedIds = new HashSet<string>(
-                plan.Compartments.Where(c => c.IsApprovedForPlacement).Select(c => c.CompartmentId));
+            var jobs = new List<(PlacementPlan Plan, Level Level, List<ProposedDevice> Devices)>();
+            foreach (var plan in plans)
+            {
+                var level = doc.GetElement(RevitIds.FromKey(plan.LevelElementId)) as Level ?? activeView.GenLevel;
+                if (level == null)
+                {
+                    result.Warnings.Add($"Level '{plan.LevelName}' was not found in the active document; its devices were not placed.");
+                    continue;
+                }
 
-            var toPlace = plan.Devices
-                .Where(d => d.Role == DeviceRole.SmokeDetector && approvedIds.Contains(d.CompartmentId))
-                .ToList();
+                var approved = new HashSet<string>(
+                    plan.Compartments.Where(c => c.IsApprovedForPlacement).Select(c => c.CompartmentId));
+                var devices = plan.Devices
+                    .Where(d => !d.IsExcluded && approved.Contains(d.CompartmentId))
+                    .ToList();
+                jobs.Add((plan, level, devices));
+            }
 
-            if (toPlace.Count == 0)
+            if (jobs.All(job => job.Devices.Count == 0))
                 return result;
 
-            Level? activeLevel = activeView.GenLevel;
-            double levelElevMm = activeLevel != null ? activeLevel.Elevation * FtToMm : 0.0;
-            bool isOneLevelBased = detectorSymbol.Family?.FamilyPlacementType == FamilyPlacementType.OneLevelBased;
-            Reference? levelPlaneRef = activeLevel?.GetPlaneReference();
-
-            using (var tx = new Transaction(doc, $"Fire Detection Layout ({plan.RunId})"))
+            using (var tx = new Transaction(doc, "Fire Detection Layout"))
             {
                 tx.Start();
 
-                if (!detectorSymbol.IsActive)
+                foreach (var symbol in new[] { families.SmokeDetector, families.HeatDetector, families.Speaker })
                 {
-                    detectorSymbol.Activate();
-                    doc.Regenerate();
+                    if (symbol != null && !symbol.IsActive)
+                        symbol.Activate();
                 }
 
-                Dictionary<string, ReferencePlane>? existingRefPlanes = null;
-                var refPlanesByZ = new Dictionary<int, ReferencePlane>();
+                doc.Regenerate();
 
-                foreach (var device in toPlace)
+                Dictionary<string, ReferencePlane>? referencePlanes = null;
+                foreach (var (plan, level, devices) in jobs)
                 {
-                    int elevKeyMm = (int)Math.Round(device.ElevationMm);
-                    double offsetFt = (elevKeyMm - levelElevMm) * MmToFt;
-                    FamilyInstance? instance = null;
+                    if (replaceToolOwned)
+                        result.RemovedCount += RemoveToolOwnedDevices(doc, plan, level, families);
 
-                    if (activeLevel != null && isOneLevelBased)
+                    var missingKinds = new HashSet<DeviceRole>();
+                    var planesByElevation = new Dictionary<int, ReferencePlane>();
+                    foreach (var device in devices)
                     {
-                        var pt = new XYZ(device.Location.X * MmToFt, device.Location.Y * MmToFt, 0.0);
-                        instance = doc.Create.NewFamilyInstance(
-                            pt,
-                            detectorSymbol,
-                            activeLevel,
-                            StructuralType.NonStructural);
+                        var symbol = families.Get(device.Role);
+                        if (symbol == null)
+                        {
+                            result.SkippedCount++;
+                            if (missingKinds.Add(device.Role))
+                                result.Warnings.Add($"No family type is mapped for {device.Role.ToDisplayName().ToLowerInvariant()}s; they were not placed.");
+                            continue;
+                        }
 
-                        ApplyLevelElevationOffset(doc, instance, activeLevel.Elevation, offsetFt);
-                    }
-                    else if (activeLevel != null && levelPlaneRef != null)
-                    {
+                        FamilyInstance? instance;
                         try
                         {
-                            var pt = new XYZ(device.Location.X * MmToFt, device.Location.Y * MmToFt, activeLevel.Elevation);
-                            instance = doc.Create.NewFamilyInstance(
-                                levelPlaneRef,
-                                pt,
-                                XYZ.BasisX,
-                                detectorSymbol);
-
-                            TryFlipWorkPlane(instance);
-                            ApplyLevelElevationOffset(doc, instance, activeLevel.Elevation, offsetFt);
+                            instance = PlaceDevice(doc, activeView, level, device, symbol, plan.RunId, planesByElevation, ref referencePlanes);
                         }
-                        catch
+                        catch (Exception error) when (error is Autodesk.Revit.Exceptions.ApplicationException ||
+                                                      error is InvalidOperationException)
                         {
                             instance = null;
+                            result.Warnings.Add($"'{symbol.FamilyName} : {symbol.Name}' could not be placed: {error.Message}");
                         }
-                    }
 
-                    if (instance == null)
-                    {
-                        existingRefPlanes ??= CollectExistingRefPlanes(doc);
-                        if (!refPlanesByZ.TryGetValue(elevKeyMm, out ReferencePlane? refPlane))
+                        if (instance == null)
                         {
-                            double zFt = elevKeyMm * MmToFt;
-                            refPlane = GetOrCreateHorizontalRefPlane(
-                                doc, activeView, existingRefPlanes, elevKeyMm, zFt, plan.RunId);
-                            refPlanesByZ[elevKeyMm] = refPlane;
+                            result.SkippedCount++;
+                            continue;
                         }
 
-                        var pt = new XYZ(device.Location.X * MmToFt, device.Location.Y * MmToFt, elevKeyMm * MmToFt);
-                        instance = doc.Create.NewFamilyInstance(
-                            refPlane.GetReference(),
-                            pt,
-                            XYZ.BasisX,
-                            detectorSymbol);
+                        RotateToRoomGrid(doc, instance, device);
+                        Parameter? comments = instance.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS);
+                        if (comments != null && !comments.IsReadOnly)
+                            comments.Set($"{OwnershipTag}:{plan.RunId}:{device.CompartmentId}:{device.Role}");
 
-                        TryFlipWorkPlane(instance);
+                        if (device.Role == DeviceRole.EwisSpeaker)
+                            result.PlacedSpeakers++;
+                        else
+                            result.PlacedDetectors++;
                     }
-
-                    Parameter? comments = instance.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS);
-                    if (comments != null && !comments.IsReadOnly)
-                    {
-                        comments.Set($"FIRE_LAYOUT_AUTO:{plan.RunId}:{device.CompartmentId}");
-                    }
-
-                    result.PlacedCount++;
                 }
 
                 tx.Commit();
             }
 
             return result;
+        }
+
+        private static FamilyInstance? PlaceDevice(
+            Document doc,
+            View activeView,
+            Level level,
+            ProposedDevice device,
+            FamilySymbol symbol,
+            string runId,
+            Dictionary<int, ReferencePlane> planesByElevation,
+            ref Dictionary<string, ReferencePlane>? referencePlanes)
+        {
+            double levelElevMm = level.Elevation * FtToMm;
+            int elevationMm = (int)Math.Round(device.ElevationMm);
+            double offsetFt = (elevationMm - levelElevMm) * MmToFt;
+            double x = device.Location.X * MmToFt;
+            double y = device.Location.Y * MmToFt;
+            var placementType = symbol.Family?.FamilyPlacementType ?? FamilyPlacementType.Invalid;
+
+            if (placementType == FamilyPlacementType.OneLevelBased)
+            {
+                var instance = doc.Create.NewFamilyInstance(
+                    new XYZ(x, y, 0.0), symbol, level, StructuralType.NonStructural);
+                ApplyLevelElevationOffset(doc, instance, level.Elevation, offsetFt);
+                return instance;
+            }
+
+            if (placementType == FamilyPlacementType.OneLevelBasedHosted)
+            {
+                // Ceiling-hosted families need a ceiling in this document; linked ceilings cannot host them.
+                if (doc.GetElement(RevitIds.FromKey(device.HostCeilingElementId)) is Ceiling host)
+                {
+                    return doc.Create.NewFamilyInstance(
+                        new XYZ(x, y, elevationMm * MmToFt), symbol, host, level, StructuralType.NonStructural);
+                }
+
+                throw new InvalidOperationException(
+                    "this family is ceiling-hosted and the ceiling here is in a linked model or missing. Use a level-based or face-based (work plane) family");
+            }
+
+            Reference? levelPlane = level.GetPlaneReference();
+            if (levelPlane != null)
+            {
+                try
+                {
+                    var instance = doc.Create.NewFamilyInstance(
+                        levelPlane, new XYZ(x, y, level.Elevation), XYZ.BasisX, symbol);
+                    TryFlipWorkPlane(instance);
+                    ApplyLevelElevationOffset(doc, instance, level.Elevation, offsetFt);
+                    return instance;
+                }
+                catch (Autodesk.Revit.Exceptions.ApplicationException)
+                {
+                    // Family rejects the level plane; fall through to a dedicated reference plane.
+                }
+            }
+
+            referencePlanes ??= CollectExistingRefPlanes(doc);
+            if (!planesByElevation.TryGetValue(elevationMm, out ReferencePlane? plane))
+            {
+                plane = GetOrCreateHorizontalRefPlane(
+                    doc, activeView, referencePlanes, elevationMm, elevationMm * MmToFt, runId);
+                planesByElevation[elevationMm] = plane;
+            }
+
+            var hosted = doc.Create.NewFamilyInstance(
+                plane.GetReference(), new XYZ(x, y, elevationMm * MmToFt), XYZ.BasisX, symbol);
+            TryFlipWorkPlane(hosted);
+            return hosted;
+        }
+
+        /// <summary>
+        /// Deletes devices this tool placed earlier inside the spaces now being committed, so a
+        /// re-run replaces its own work and never touches manually placed devices.
+        /// </summary>
+        private static int RemoveToolOwnedDevices(Document doc, PlacementPlan plan, Level level, DeviceFamilyMap families)
+        {
+            var spaces = plan.Compartments
+                .Where(c => c.IsApprovedForPlacement)
+                .Select(c => WallGraphPolygonizer.TryToValidNtsPolygon(c.Boundary))
+                .Where(polygon => polygon != null)
+                .Select(polygon => PreparedGeometryFactory.Prepare(polygon!))
+                .ToList();
+            if (spaces.Count == 0)
+                return 0;
+
+            var categories = new HashSet<ElementId> { new ElementId(BuiltInCategory.OST_FireAlarmDevices) };
+            foreach (var symbol in new[] { families.SmokeDetector, families.HeatDetector, families.Speaker })
+            {
+                if (symbol?.Category != null)
+                    categories.Add(symbol.Category.Id);
+            }
+
+            double levelElevFt = level.Elevation;
+            double nextLevelFt = new FilteredElementCollector(doc)
+                .OfClass(typeof(Level))
+                .Cast<Level>()
+                .Select(l => l.Elevation)
+                .Where(z => z > levelElevFt + 1500.0 * MmToFt)
+                .DefaultIfEmpty(levelElevFt + 10000.0 * MmToFt)
+                .Min();
+
+            var factory = new NetTopologySuite.Geometries.GeometryFactory();
+            var toDelete = new List<ElementId>();
+            foreach (var categoryId in categories)
+            {
+                var instances = new FilteredElementCollector(doc)
+                    .OfCategoryId(categoryId)
+                    .WhereElementIsNotElementType()
+                    .OfType<FamilyInstance>();
+                foreach (var instance in instances)
+                {
+                    string comments = instance.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)?.AsString() ?? string.Empty;
+                    if (comments.IndexOf(OwnershipTag, StringComparison.OrdinalIgnoreCase) < 0)
+                        continue;
+                    if (!(instance.Location is LocationPoint location))
+                        continue;
+
+                    XYZ point = location.Point;
+                    if (point.Z < levelElevFt - 0.01 || point.Z >= nextLevelFt)
+                        continue;
+
+                    var modelPoint = factory.CreatePoint(
+                        new NetTopologySuite.Geometries.Coordinate(point.X * FtToMm, point.Y * FtToMm));
+                    if (spaces.Any(space => space.Covers(modelPoint)))
+                        toDelete.Add(instance.Id);
+                }
+            }
+
+            if (toDelete.Count > 0)
+                doc.Delete(toDelete);
+            return toDelete.Count;
+        }
+
+        /// <summary>Turns the symbol to follow a rotated room so device text and pairs read square to the walls.</summary>
+        private static void RotateToRoomGrid(Document doc, FamilyInstance instance, ProposedDevice device)
+        {
+            if (Math.Abs(device.RotationDegrees) < 0.01 || !(instance.Location is LocationPoint location))
+                return;
+
+            try
+            {
+                XYZ point = location.Point;
+                ElementTransformUtils.RotateElement(
+                    doc, instance.Id, Line.CreateBound(point, point + XYZ.BasisZ), device.RotationDegrees * Math.PI / 180.0);
+            }
+            catch (Autodesk.Revit.Exceptions.ApplicationException)
+            {
+                // Some hosted families cannot be rotated; the position is still correct.
+            }
         }
 
         private static void TryFlipWorkPlane(FamilyInstance instance)
@@ -140,7 +304,7 @@ namespace FireDetectionLayout.Revit.Placement
                 if (instance.CanFlipWorkPlane)
                     instance.IsWorkPlaneFlipped = true;
             }
-            catch
+            catch (Autodesk.Revit.Exceptions.ApplicationException)
             {
                 // Non-flippable family; keep default orientation.
             }
@@ -203,7 +367,7 @@ namespace FireDetectionLayout.Revit.Placement
                     if (Math.Abs(plane.Normal.Z) > 0.99 && Math.Abs(plane.Origin.Z - zFt) <= 0.005)
                         return existing;
                 }
-                catch
+                catch (Autodesk.Revit.Exceptions.ApplicationException)
                 {
                     // Fall through and create a new uniquely named plane.
                 }

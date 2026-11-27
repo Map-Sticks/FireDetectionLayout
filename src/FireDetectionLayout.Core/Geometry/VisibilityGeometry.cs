@@ -1,5 +1,6 @@
 using FireDetectionLayout.Core.Models;
 using NetTopologySuite.Geometries;
+using NetTopologySuite.Geometries.Prepared;
 
 namespace FireDetectionLayout.Core.Geometry
 {
@@ -9,20 +10,31 @@ namespace FireDetectionLayout.Core.Geometry
 
         public static bool IsVisible(Polygon compartment, Point2D from, Point2D to)
         {
+            var line = BuildSightLine(from, to);
+            return line == null || compartment.Covers(line);
+        }
+
+        public static bool IsVisible(IPreparedGeometry compartment, Point2D from, Point2D to)
+        {
+            var line = BuildSightLine(from, to);
+            return line == null || compartment.Covers(line);
+        }
+
+        private static LineString? BuildSightLine(Point2D from, Point2D to)
+        {
             double dist = from.DistanceTo(to);
             if (dist < 1.0)
-                return true;
+                return null;
 
             // Pull the target endpoint slightly inward along the ray so boundary target points
             // on diagonal/rotated walls do not fail NTS Covers() due to floating-point drift.
             double inset = System.Math.Min(0.5, dist * 0.01);
             double scale = (dist - inset) / dist;
-            var line = Factory.CreateLineString(new[]
+            return Factory.CreateLineString(new[]
             {
                 new Coordinate(from.X, from.Y),
                 new Coordinate(from.X + (to.X - from.X) * scale, from.Y + (to.Y - from.Y) * scale)
             });
-            return compartment.Covers(line);
         }
     }
 }

@@ -20,10 +20,15 @@ namespace FireDetectionLayout.Revit
         public static FireLayoutPreviewServer? PreviewServer { get; private set; }
         public static FireLayoutEventHandler EventHandler { get; private set; } = null!;
         public static Autodesk.Revit.UI.ExternalEvent RevitEvent { get; private set; } = null!;
+
+        /// <summary>Revit's main window, which owns the modeless preview window.</summary>
+        public static IntPtr MainWindowHandle { get; private set; }
+
         private static MultiServerService? _previewService;
 
         public Result OnStartup(UIControlledApplication application)
         {
+            MainWindowHandle = application.MainWindowHandle;
             RegisterPreviewServer();
             EventHandler = new FireLayoutEventHandler();
             RevitEvent = Autodesk.Revit.UI.ExternalEvent.Create(EventHandler);
@@ -95,19 +100,28 @@ namespace FireDetectionLayout.Revit
                 ?? application.CreateRibbonPanel(tabName, panelName);
 
             var assemblyPath = Assembly.GetExecutingAssembly().Location;
-            var buttonData = new PushButtonData(
+            panel.AddItem(new PushButtonData(
                 nameof(OpenFireLayoutCommand),
                 "Fire\nLayout",
                 assemblyPath,
-                typeof(OpenFireLayoutCommand).FullName);
-
-            panel.AddItem(buttonData);
+                typeof(OpenFireLayoutCommand).FullName)
+            {
+                ToolTip = "Open the Fire Detection Layout pane: choose the scope, devices and spacing rules, then analyse."
+            });
+            panel.AddItem(new PushButtonData(
+                nameof(OpenLayoutPreviewCommand),
+                "Layout\nPreview",
+                assemblyPath,
+                typeof(OpenLayoutPreviewCommand).FullName)
+            {
+                ToolTip = "Open the layout preview window to review, adjust and commit the proposed devices."
+            });
         }
 
         private static void RegisterDockablePane(UIControlledApplication application)
         {
             PaneInstance = new FireLayoutPane();
-            application.RegisterDockablePane(PaneId, "Fire Detection Layout (AS 1670)", PaneInstance);
+            application.RegisterDockablePane(PaneId, "Fire Detection Layout", PaneInstance);
         }
     }
 }

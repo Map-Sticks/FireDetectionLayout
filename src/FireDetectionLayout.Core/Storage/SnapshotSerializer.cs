@@ -11,6 +11,9 @@ namespace FireDetectionLayout.Core.Storage
         {
             Formatting = Formatting.Indented,
             NullValueHandling = NullValueHandling.Ignore,
+
+            // Lists that carry defaults (rule keywords) must be replaced on load, not appended to.
+            ObjectCreationHandling = ObjectCreationHandling.Replace,
             Converters = { new StringEnumConverter() }
         };
 
